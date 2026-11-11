@@ -16,6 +16,10 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime
 from dotenv import load_dotenv
+import warnings
+
+# Silenciar advertencia de pandas sobre DBAPI2 (pyodbc)
+warnings.filterwarnings('ignore', category=UserWarning, module='pandas')
 
 # Cargar variables de entorno desde .env
 load_dotenv()
@@ -61,7 +65,8 @@ def get_db_connection():
     user = os.getenv("DB_USER", "sa")
     password = os.getenv("DB_PASSWORD", "")
     driver = os.getenv("DB_ODBC_DRIVER", "ODBC Driver 17 for SQL Server")
-    trust_cert = os.getenv("DB_TRUST_SERVER_CERTIFICATE", "yes")
+    trust_cert_raw = os.getenv("DB_TRUST_SERVER_CERTIFICATE", "yes").lower()
+    trust_cert = "yes" if trust_cert_raw in ["true", "yes", "1"] else "no"
 
     conn_str = (
         f"DRIVER={{{driver}}};"
@@ -71,7 +76,19 @@ def get_db_connection():
         f"PWD={password};"
         f"TrustServerCertificate={trust_cert};"
     )
-    return pyodbc.connect(conn_str, timeout=5)
+    try:
+        return pyodbc.connect(conn_str, timeout=3)
+    except Exception:
+        # Fallback a Shared Memory / Local
+        conn_str_local = (
+            f"DRIVER={{{driver}}};"
+            f"SERVER=(local);"
+            f"DATABASE={database};"
+            f"UID={user};"
+            f"PWD={password};"
+            f"TrustServerCertificate={trust_cert};"
+        )
+        return pyodbc.connect(conn_str_local, timeout=5)
 
 @st.cache_data(ttl=2)
 def load_buyer_data():
@@ -350,12 +367,13 @@ with tab_tabla:
         'buyer_id', 'fecha_buyer', 'estado_buyer', 'nombres', 'whatsapp', 
         'universidad', 'carrera', 'etapa_academica', 'necesidad_inicial'
     ]
+    styler = df_filtrado[cols_ver].style
+    color_fn = lambda v: 'background-color: #dcfce7; color: #166534; font-weight: bold;' if v == 'ACTIVO' else (
+                         'background-color: #fee2e2; color: #991b1b; font-weight: bold;' if v == 'SIN_COBERTURA' else ''
+               )
+    styler_mapped = styler.map(color_fn, subset=['estado_buyer']) if hasattr(styler, 'map') else styler.applymap(color_fn, subset=['estado_buyer'])
     st.dataframe(
-        df_filtrado[cols_ver].style.applymap(
-            lambda v: 'background-color: #dcfce7; color: #166534; font-weight: bold;' if v == 'ACTIVO' else (
-                      'background-color: #fee2e2; color: #991b1b; font-weight: bold;' if v == 'SIN_COBERTURA' else ''
-            ), subset=['estado_buyer']
-        ),
+        styler_mapped,
         use_container_width=True,
         height=400
     )

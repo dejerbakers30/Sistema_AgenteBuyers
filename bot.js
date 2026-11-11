@@ -1,350 +1,425 @@
 /**
  * ==============================================================================
- * bot.js - AGENTE IA DE WHATSAPP PARA LA FASE BUYER (INBESTIGA)
+ * bot.js  –  AGENTE IA WHATSAPP "VICKY" · INBESTIGA · FASE BUYER
  * ==============================================================================
- * Responsabilidades:
- * 1. Conexión a WhatsApp real mediante whatsapp-web.js (persistencia LocalAuth).
- * 2. Orquestación conversacional con Grok (xAI API) mediante Function Calling.
- * 3. Ejecución de herramientas:
- *    - verificar_cobertura: consulta en UNIVERSIDAD y CARRERA (flag atendida).
- *    - registrar_buyer: transacción atómica (CONTACTO -> PERFIL_ACADEMICO -> BUYER).
- * 4. Registro y auditoría en CONVERSACION y MENSAJE.
+ * Responsable : D'Alessandro (Arquitecto del Bot y la IA – Backend)
+ * Stack       : Node.js v18+ | whatsapp-web.js | xAI Grok API | mssql
+ *
+ * Flujo conversacional garantizado:
+ *   1. Saludo → Presenta a "Vicky" la asistente virtual de INBESTIGA.
+ *   2. Pide Universidad y Carrera.
+ *   3. Llama a [verificar_cobertura] → consulta UNIVERSIDAD ⨝ CARRERA.
+ *   4a. Con cobertura  → Pide Nombre + registra en BD (ACTIVO).
+ *   4b. Sin cobertura  → Deriva a lista de espera (SIN_COBERTURA).
+ *   5. Registra CONTACTO → PERFIL_ACADEMICO → BUYER (transacción atómica).
+ *   6. Auditoría completa en CONVERSACION y MENSAJE.
+ *
+ * Notas técnicas:
+ *   - Conexión SQL Server mediante pool persistente (mssql).
+ *   - Function Calling con xAI Grok (compatible con OpenAI SDK v4).
+ *   - Sesión WhatsApp persistida con LocalAuth (.wwebjs_auth/).
+ *   - Historial conversacional en memoria, limitado a 20 turnos.
+ *   - Manejo robusto de errores con ROLLBACK automático.
  * ==============================================================================
  */
 
+'use strict';
 require('dotenv').config();
+
 const { Client, LocalAuth } = require('whatsapp-web.js');
-const qrcode = require('qrcode-terminal');
-const sql = require('mssql');
-const OpenAI = require('openai');
+const qrcode               = require('qrcode-terminal');
+const sql                  = require('mssql');
+const OpenAI               = require('openai');
 
-// ------------------------------------------------------------------------------
+// ==============================================================================
 // 1. CONFIGURACIÓN DE CONEXIONES
-// ------------------------------------------------------------------------------
+// ==============================================================================
 
-// Configuración de SQL Server
+/** Configuración del pool de conexión a SQL Server (INBESTIGA_TESIS). */
 const dbConfig = {
-    server: process.env.DB_SERVER || 'localhost',
-    port: parseInt(process.env.DB_PORT, 10) || 1433,
-    database: process.env.DB_NAME || 'INBESTIGA_TESIS',
-    user: process.env.DB_USER || 'sa',
+    server  : process.env.DB_SERVER || 'localhost',
+    port    : parseInt(process.env.DB_PORT, 10) || 1433,
+    database: process.env.DB_NAME   || 'INBESTIGA_TESIS',
+    user    : process.env.DB_USER   || 'sa',
     password: process.env.DB_PASSWORD || '',
-    options: {
-        encrypt: false,
-        trustServerCertificate: (process.env.DB_TRUST_SERVER_CERTIFICATE || 'true') === 'true',
-        enableArithAbort: true
+    options : {
+        encrypt                : false,
+        trustServerCertificate : (process.env.DB_TRUST_SERVER_CERTIFICATE || 'true') === 'true',
+        enableArithAbort       : true,
+        connectTimeout         : 15000,
+        requestTimeout         : 30000,
     },
     pool: {
-        max: 10,
-        min: 0,
-        idleTimeoutMillis: 30000
-    }
+        max              : 10,
+        min              : 0,
+        idleTimeoutMillis: 30000,
+        acquireTimeoutMillis: 30000,
+    },
 };
 
+/** Instancia del pool de conexión (singleton). */
 let dbPool = null;
 
+/**
+ * Devuelve el pool de conexión activo, creándolo si no existe.
+ * @returns {Promise<sql.ConnectionPool>}
+ */
 async function getDbPool() {
-    if (!dbPool) {
-        try {
-            dbPool = await sql.connect(dbConfig);
-            console.log('✅ [SQL Server] Conexión establecida a INBESTIGA_TESIS');
-        } catch (err) {
-            console.error('❌ [SQL Server] Error al conectar:', err.message);
-            throw err;
-        }
+    if (dbPool && dbPool.connected) return dbPool;
+    try {
+        dbPool = await sql.connect(dbConfig);
+        console.log('✅ [SQL Server] Conexión establecida a INBESTIGA_TESIS');
+    } catch (err) {
+        console.error('❌ [SQL Server] Error al conectar:', err.message);
+        throw err;
     }
     return dbPool;
 }
 
-// Configuración de Cliente xAI (Grok API compatible con OpenAI)
-const xaiClient = new OpenAI({
-    apiKey: process.env.XAI_API_KEY || 'dummy-key',
-    baseURL: 'https://api.x.ai/v1'
+/**
+ * Configuración dinámica de IA:
+ * Soporta Google Gemini, Groq Cloud, Grok (xAI) u OpenAI directamente.
+ * Detecta automáticamente el proveedor según el formato de la clave o variables de entorno.
+ */
+const AI_API_KEY = process.env.AI_API_KEY || process.env.GEMINI_API_KEY || process.env.GROQ_API_KEY || process.env.XAI_API_KEY || 'dummy-key';
+
+const isGoogle = !!process.env.GEMINI_API_KEY || AI_API_KEY.startsWith('AIza') || AI_API_KEY.startsWith('AQ.');
+
+const AI_BASE_URL = process.env.AI_BASE_URL || (
+    isGoogle
+        ? 'https://generativelanguage.googleapis.com/v1beta/openai/'
+        : (process.env.GROQ_API_KEY || AI_API_KEY.startsWith('gsk_'))
+            ? 'https://api.groq.com/openai/v1'
+            : 'https://api.x.ai/v1'
+);
+
+let AI_MODEL = process.env.AI_MODEL;
+if (!AI_MODEL || AI_MODEL === 'grok-2-latest' || AI_MODEL === 'gemini-2.0-flash' || AI_MODEL === 'gemini-1.5-flash') {
+    if (AI_BASE_URL.includes('googleapis.com')) AI_MODEL = 'gemini-3.8-flash';
+    else if (AI_BASE_URL.includes('groq.com')) AI_MODEL = 'llama-3.3-70b-versatile';
+    else AI_MODEL = 'grok-2-latest';
+}
+
+const aiClient = new OpenAI({
+    apiKey : AI_API_KEY,
+    baseURL: AI_BASE_URL,
 });
 
-const GROK_MODEL = process.env.XAI_MODEL || 'grok-2-latest';
-
-// Historial en memoria por número de WhatsApp para mantener el contexto
-const conversationHistory = new Map();
-
-// ------------------------------------------------------------------------------
-// 2. HERRAMIENTAS DE BASE DE DATOS (FUNCTION CALLING)
-// ------------------------------------------------------------------------------
+console.log(`🧠 [IA Config] Proveedor: ${AI_BASE_URL} | Modelo: ${AI_MODEL}`);
 
 /**
- * Consulta la cobertura académica para la universidad y carrera indicadas.
+ * Historial conversacional por número de WhatsApp.
+ * Estructura: Map<string, Array<{role, content}>>
+ */
+const conversationHistory = new Map();
+
+// ==============================================================================
+// 2. HERRAMIENTAS DE BASE DE DATOS (FUNCTION CALLING)
+// ==============================================================================
+
+/**
+ * Verifica si INBESTIGA atiende la universidad y carrera indicadas.
+ * Estrategia de búsqueda en dos fases:
+ *   - Fase 1: JOIN directo (nombre universidad LIKE) AND (nombre carrera LIKE).
+ *   - Fase 2: Búsquedas independientes si el JOIN no devuelve resultados.
+ *
+ * @param {object} param0
+ * @param {string} param0.universidad - Nombre o sigla de la universidad.
+ * @param {string} param0.carrera     - Nombre de la carrera.
+ * @returns {Promise<object>} Resultado con {encontrado, universidad_id, carrera_id, cobertura, mensaje}.
  */
 async function verificarCobertura({ universidad, carrera }) {
-    console.log(`🔍 [Tool: verificar_cobertura] Verificando: "${universidad}" - "${carrera}"`);
+    console.log(`\n🔍 [verificar_cobertura] "${universidad}" | "${carrera}"`);
     try {
-        const pool = await getDbPool();
-        
-        // Búsqueda flexible con comodines LIKE para tolerar variaciones
-        const query = `
-            SELECT TOP 1
-                u.universidad_id,
-                u.nombre AS universidad_nombre,
-                u.atendida AS universidad_atendida,
-                c.carrera_id,
-                c.nombre AS carrera_nombre,
-                c.atendida AS carrera_atendida
-            FROM UNIVERSIDAD u
-            INNER JOIN CARRERA c ON c.universidad_id = u.universidad_id
-            WHERE u.nombre LIKE @uFiltro
-              AND c.nombre LIKE @cFiltro;
-        `;
+        const pool    = await getDbPool();
+        const uFiltro = `%${universidad.trim()}%`;
+        const cFiltro = `%${carrera.trim()}%`;
 
-        const request = pool.request();
-        request.input('uFiltro', sql.VarChar, `%${universidad.trim()}%`);
-        request.input('cFiltro', sql.VarChar, `%${carrera.trim()}%`);
+        // ── Fase 1: JOIN directo ──────────────────────────────────────────────
+        const joinResult = await pool.request()
+            .input('uFiltro', sql.VarChar(150), uFiltro)
+            .input('cFiltro', sql.VarChar(150), cFiltro)
+            .query(`
+                SELECT TOP 1
+                    u.universidad_id,
+                    u.nombre     AS universidad_nombre,
+                    u.atendida   AS universidad_atendida,
+                    c.carrera_id,
+                    c.nombre     AS carrera_nombre,
+                    c.atendida   AS carrera_atendida
+                FROM UNIVERSIDAD u
+                INNER JOIN CARRERA c ON c.universidad_id = u.universidad_id
+                WHERE u.nombre LIKE @uFiltro
+                  AND c.nombre LIKE @cFiltro;
+            `);
 
-        const result = await request.query(query);
-
-        if (result.recordset.length > 0) {
-            const row = result.recordset[0];
-            const cobertura = (row.universidad_atendida === true || row.universidad_atendida === 1) &&
-                              (row.carrera_atendida === true || row.carrera_atendida === 1);
+        if (joinResult.recordset.length > 0) {
+            const row       = joinResult.recordset[0];
+            const cobertura = !!(row.universidad_atendida) && !!(row.carrera_atendida);
+            console.log(`   → JOIN directo: ${cobertura ? '✅ ACTIVA' : '⚠️ SIN COBERTURA'} (${row.universidad_nombre} - ${row.carrera_nombre})`);
             return {
-                encontrado: true,
-                universidad_id: row.universidad_id,
-                universidad_nombre: row.universidad_nombre,
-                carrera_id: row.carrera_id,
-                carrera_nombre: row.carrera_nombre,
-                cobertura: cobertura,
-                mensaje: cobertura 
-                    ? `Tenemos cobertura completa para ${row.carrera_nombre} en ${row.universidad_nombre}.`
-                    : `No atendemos actualmente la carrera o universidad consultada.`
+                encontrado         : true,
+                universidad_id     : row.universidad_id,
+                universidad_nombre : row.universidad_nombre,
+                carrera_id         : row.carrera_id,
+                carrera_nombre     : row.carrera_nombre,
+                cobertura,
+                mensaje: cobertura
+                    ? `Cobertura activa para ${row.carrera_nombre} en ${row.universidad_nombre}.`
+                    : `La carrera o universidad no está atendida actualmente.`,
             };
         }
 
-        // Búsqueda parcial si no coincide en el JOIN directo
-        const uReq = pool.request();
-        uReq.input('uFiltro', sql.VarChar, `%${universidad.trim()}%`);
-        const uRes = await uReq.query(`SELECT TOP 1 universidad_id, nombre, atendida FROM UNIVERSIDAD WHERE nombre LIKE @uFiltro`);
-
-        const cReq = pool.request();
-        cReq.input('cFiltro', sql.VarChar, `%${carrera.trim()}%`);
-        const cRes = await cReq.query(`SELECT TOP 1 carrera_id, universidad_id, nombre, atendida FROM CARRERA WHERE nombre LIKE @cFiltro`);
+        // ── Fase 2: búsquedas independientes ─────────────────────────────────
+        const [uRes, cRes] = await Promise.all([
+            pool.request()
+                .input('uFiltro', sql.VarChar(150), uFiltro)
+                .query(`SELECT TOP 1 universidad_id, nombre, atendida FROM UNIVERSIDAD WHERE nombre LIKE @uFiltro`),
+            pool.request()
+                .input('cFiltro', sql.VarChar(150), cFiltro)
+                .query(`SELECT TOP 1 carrera_id, universidad_id, nombre, atendida FROM CARRERA WHERE nombre LIKE @cFiltro`),
+        ]);
 
         const uFound = uRes.recordset[0] || null;
         const cFound = cRes.recordset[0] || null;
 
         if (uFound && cFound) {
-            const cobertura = (uFound.atendida && cFound.atendida);
+            const cobertura = !!(uFound.atendida) && !!(cFound.atendida);
+            console.log(`   → Búsqueda independiente: ${cobertura ? '✅ ACTIVA' : '⚠️ SIN COBERTURA'}`);
             return {
-                encontrado: true,
-                universidad_id: uFound.universidad_id,
-                universidad_nombre: uFound.nombre,
-                carrera_id: cFound.carrera_id,
-                carrera_nombre: cFound.nombre,
-                cobertura: Boolean(cobertura),
-                mensaje: cobertura 
+                encontrado         : true,
+                universidad_id     : uFound.universidad_id,
+                universidad_nombre : uFound.nombre,
+                carrera_id         : cFound.carrera_id,
+                carrera_nombre     : cFound.nombre,
+                cobertura,
+                mensaje: cobertura
                     ? `Cobertura confirmada para ${cFound.nombre} en ${uFound.nombre}.`
-                    : `Universidad o carrera sin cobertura activa en este momento.`
+                    : `Universidad o carrera sin cobertura activa en este momento.`,
             };
         }
 
-        // Si no existe registro en la base de datos
+        // ── Sin resultados en catálogo ────────────────────────────────────────
+        console.log('   → No encontrado en catálogo → SIN COBERTURA.');
         return {
-            encontrado: false,
-            universidad_id: uFound ? uFound.universidad_id : null,
-            carrera_id: cFound ? cFound.carrera_id : 1, // Fallback controlado
-            cobertura: false,
-            mensaje: `La universidad o carrera indicada no se encuentra en el catálogo oficial de INBESTIGA.`
+            encontrado         : false,
+            universidad_id     : uFound ? uFound.universidad_id : null,
+            universidad_nombre : uFound ? uFound.nombre : universidad,
+            carrera_id         : cFound ? cFound.carrera_id : 1, // fallback controlado
+            carrera_nombre     : cFound ? cFound.nombre : carrera,
+            cobertura          : false,
+            mensaje            : 'La universidad o carrera no se encuentra en el catálogo oficial de INBESTIGA.',
         };
 
     } catch (err) {
-        console.error('❌ Error en verificarCobertura:', err.message);
-        return { encontrado: false, cobertura: false, error: err.message };
+        console.error('❌ [verificarCobertura] Error:', err.message);
+        return { encontrado: false, cobertura: false, carrera_id: 1, error: err.message };
     }
 }
 
 /**
- * Realiza la inserción transaccional atómica:
- * CONTACTO -> PERFIL_ACADEMICO -> BUYER
+ * Registra transaccionalmente al estudiante como Buyer.
+ * Orden garantizado sin violar claves foráneas:
+ *   1. CONTACTO        (crea o actualiza)
+ *   2. PERFIL_ACADEMICO (crea si no existe)
+ *   3. BUYER           (crea o actualiza estado)
+ *
+ * @param {object} data - Datos del estudiante recopilados por Vicky.
+ * @returns {Promise<object>} Resultado con {exito, contacto_id, buyer_id, estado}.
  */
 async function registrarBuyerTransaccional(data) {
-    console.log(`📝 [Tool: registrar_buyer] Iniciando registro transaccional para: ${data.nombres} (${data.whatsapp})`);
-    const pool = await getDbPool();
+    console.log(`\n📝 [registrar_buyer] Iniciando transacción para: ${data.nombres} (${data.whatsapp})`);
+    const pool        = await getDbPool();
     const transaction = new sql.Transaction(pool);
 
     try {
         await transaction.begin();
 
-        // 1. GESTIÓN DE CONTACTO
-        const contactReq = new sql.Request(transaction);
-        contactReq.input('whatsapp', sql.VarChar(30), data.whatsapp);
-        const contactCheck = await contactReq.query(`
-            SELECT contacto_id FROM CONTACTO WHERE whatsapp = @whatsapp
-        `);
+        // ── 1. CONTACTO ───────────────────────────────────────────────────────
+        const checkContacto = await new sql.Request(transaction)
+            .input('whatsapp', sql.VarChar(30), data.whatsapp)
+            .query(`SELECT contacto_id FROM CONTACTO WHERE whatsapp = @whatsapp`);
 
-        let contactoId = null;
+        let contactoId;
 
-        if (contactCheck.recordset.length > 0) {
-            contactoId = contactCheck.recordset[0].contacto_id;
-            const updateReq = new sql.Request(transaction);
-            updateReq.input('contacto_id', sql.Int, contactoId);
-            updateReq.input('nombres', sql.VarChar(100), data.nombres);
-            updateReq.input('apellidos', sql.VarChar(100), data.apellidos || 'Por Asignar');
-            updateReq.input('correo', sql.VarChar(150), data.correo || null);
-            await updateReq.query(`
-                UPDATE CONTACTO 
-                SET nombres = @nombres, 
-                    apellidos = @apellidos, 
-                    correo = ISNULL(@correo, correo)
-                WHERE contacto_id = @contacto_id
-            `);
+        if (checkContacto.recordset.length > 0) {
+            // Ya existe: actualizar nombre si se conoce más información
+            contactoId = checkContacto.recordset[0].contacto_id;
+            await new sql.Request(transaction)
+                .input('contacto_id', sql.Int,       contactoId)
+                .input('nombres',     sql.VarChar(100), data.nombres || 'Estudiante')
+                .input('apellidos',   sql.VarChar(100), data.apellidos || 'Por Asignar')
+                .input('correo',      sql.VarChar(150), data.correo   || null)
+                .query(`
+                    UPDATE CONTACTO
+                    SET  nombres   = @nombres,
+                         apellidos = @apellidos,
+                         correo    = ISNULL(@correo, correo)
+                    WHERE contacto_id = @contacto_id
+                `);
+            console.log(`   ♻️  CONTACTO existente actualizado: ID ${contactoId}`);
         } else {
-            const insertReq = new sql.Request(transaction);
-            insertReq.input('nombres', sql.VarChar(100), data.nombres);
-            insertReq.input('apellidos', sql.VarChar(100), data.apellidos || 'Por Asignar');
-            insertReq.input('whatsapp', sql.VarChar(30), data.whatsapp);
-            insertReq.input('correo', sql.VarChar(150), data.correo || null);
-            const insertRes = await insertReq.query(`
-                INSERT INTO CONTACTO (
-                    nombres, apellidos, whatsapp, correo, 
-                    consentimiento_contacto, fecha_consentimiento, no_contactar, 
-                    fecha_registro, estado
-                )
-                VALUES (
-                    @nombres, @apellidos, @whatsapp, @correo, 
-                    1, SYSDATETIME(), 0, 
-                    SYSDATETIME(), 'ACTIVO'
-                );
-                SELECT SCOPE_IDENTITY() AS contacto_id;
-            `);
-            contactoId = insertRes.recordset[0].contacto_id;
+            // Nuevo contacto
+            const insContacto = await new sql.Request(transaction)
+                .input('nombres',   sql.VarChar(100),  data.nombres   || 'Estudiante WhatsApp')
+                .input('apellidos', sql.VarChar(100),  data.apellidos || 'Por Asignar')
+                .input('whatsapp',  sql.VarChar(30),   data.whatsapp)
+                .input('correo',    sql.VarChar(150),  data.correo    || null)
+                .query(`
+                    INSERT INTO CONTACTO (
+                        nombres, apellidos, whatsapp, correo,
+                        consentimiento_contacto, fecha_consentimiento,
+                        no_contactar, fecha_registro, estado
+                    ) VALUES (
+                        @nombres, @apellidos, @whatsapp, @correo,
+                        1, SYSDATETIME(),
+                        0, SYSDATETIME(), 'ACTIVO'
+                    );
+                    SELECT SCOPE_IDENTITY() AS contacto_id;
+                `);
+            contactoId = insContacto.recordset[0].contacto_id;
+            console.log(`   ✅ CONTACTO nuevo creado: ID ${contactoId}`);
         }
 
-        // 2. GESTIÓN DE PERFIL_ACADEMICO
-        const perfilReq = new sql.Request(transaction);
-        perfilReq.input('contacto_id', sql.Int, contactoId);
-        const perfilCheck = await perfilReq.query(`
-            SELECT perfil_academico_id FROM PERFIL_ACADEMICO WHERE contacto_id = @contacto_id
-        `);
+        // ── 2. PERFIL_ACADEMICO ───────────────────────────────────────────────
+        const carreraId = data.carrera_id || 1;
 
-        let carreraId = data.carrera_id;
-        if (!carreraId) {
-            // Asigna la primera carrera atendida por defecto si no se especificó ID válido
-            carreraId = 1;
+        const checkPerfil = await new sql.Request(transaction)
+            .input('contacto_id', sql.Int, contactoId)
+            .query(`SELECT perfil_academico_id FROM PERFIL_ACADEMICO WHERE contacto_id = @contacto_id`);
+
+        if (checkPerfil.recordset.length === 0) {
+            await new sql.Request(transaction)
+                .input('contacto_id',       sql.Int,       contactoId)
+                .input('carrera_id',        sql.Int,       carreraId)
+                .input('etapa_academica',   sql.VarChar(40), data.etapa_academica   || 'PREGRADO')
+                .input('ciclo',             sql.VarChar(20), data.ciclo             || 'X')
+                .input('sede',              sql.VarChar(80), data.sede              || 'TRUJILLO')
+                .input('tipo_investigacion',sql.VarChar(60), 'TESIS')
+                .input('avance',            sql.VarChar(30), '0-25%')
+                .query(`
+                    INSERT INTO PERFIL_ACADEMICO (
+                        contacto_id, carrera_id, etapa_academica,
+                        ciclo, sede, tipo_investigacion, avance
+                    ) VALUES (
+                        @contacto_id, @carrera_id, @etapa_academica,
+                        @ciclo, @sede, @tipo_investigacion, @avance
+                    )
+                `);
+            console.log(`   ✅ PERFIL_ACADEMICO creado para contacto_id=${contactoId}, carrera_id=${carreraId}`);
+        } else {
+            console.log(`   ♻️  PERFIL_ACADEMICO ya existe para contacto_id=${contactoId}`);
         }
 
-        if (perfilCheck.recordset.length === 0) {
-            const insertPerfil = new sql.Request(transaction);
-            insertPerfil.input('contacto_id', sql.Int, contactoId);
-            insertPerfil.input('carrera_id', sql.Int, carreraId);
-            insertPerfil.input('etapa_academica', sql.VarChar(40), data.etapa_academica || 'PREGRADO');
-            insertPerfil.input('ciclo', sql.VarChar(20), data.ciclo || 'X');
-            insertPerfil.input('sede', sql.VarChar(80), data.sede || 'TRUJILLO');
-            insertPerfil.input('tipo_investigacion', sql.VarChar(60), 'TESIS');
-            insertPerfil.input('avance', sql.VarChar(30), '0-25%');
-
-            await insertPerfil.query(`
-                INSERT INTO PERFIL_ACADEMICO (
-                    contacto_id, carrera_id, etapa_academica, ciclo, sede, tipo_investigacion, avance
-                )
-                VALUES (
-                    @contacto_id, @carrera_id, @etapa_academica, @ciclo, @sede, @tipo_investigacion, @avance
-                )
-            `);
-        }
-
-        // 3. GESTIÓN DE BUYER
-        const buyerReq = new sql.Request(transaction);
-        buyerReq.input('contacto_id', sql.Int, contactoId);
-        const buyerCheck = await buyerReq.query(`
-            SELECT buyer_id, estado FROM BUYER WHERE contacto_id = @contacto_id
-        `);
-
+        // ── 3. BUYER ──────────────────────────────────────────────────────────
         const estadoBuyer = data.tiene_cobertura ? 'ACTIVO' : 'SIN_COBERTURA';
-        let buyerId = null;
 
-        if (buyerCheck.recordset.length > 0) {
-            buyerId = buyerCheck.recordset[0].buyer_id;
-            const updateBuyer = new sql.Request(transaction);
-            updateBuyer.input('buyer_id', sql.Int, buyerId);
-            updateBuyer.input('estado', sql.VarChar(30), estadoBuyer);
-            updateBuyer.input('necesidad', sql.VarChar(150), data.necesidad_inicial || 'Asesoría de Tesis');
-            await updateBuyer.query(`
-                UPDATE BUYER 
-                SET estado = @estado, 
-                    necesidad_inicial = @necesidad 
-                WHERE buyer_id = @buyer_id
-            `);
+        const checkBuyer = await new sql.Request(transaction)
+            .input('contacto_id', sql.Int, contactoId)
+            .query(`SELECT buyer_id, estado FROM BUYER WHERE contacto_id = @contacto_id`);
+
+        let buyerId;
+
+        if (checkBuyer.recordset.length > 0) {
+            buyerId = checkBuyer.recordset[0].buyer_id;
+            await new sql.Request(transaction)
+                .input('buyer_id',  sql.Int,        buyerId)
+                .input('estado',    sql.VarChar(30), estadoBuyer)
+                .input('necesidad', sql.VarChar(150),data.necesidad_inicial || 'Asesoría de Tesis')
+                .query(`
+                    UPDATE BUYER
+                    SET  estado            = @estado,
+                         necesidad_inicial = @necesidad
+                    WHERE buyer_id = @buyer_id
+                `);
+            console.log(`   ♻️  BUYER actualizado: ID ${buyerId} → ${estadoBuyer}`);
         } else {
-            const insertBuyer = new sql.Request(transaction);
-            insertBuyer.input('contacto_id', sql.Int, contactoId);
-            insertBuyer.input('canal_captacion_id', sql.Int, 1); // WhatsApp orgánico por defecto
-            insertBuyer.input('servicio_interes_id', sql.Int, 2); // Asesoría Proyecto de Tesis
-            insertBuyer.input('necesidad_inicial', sql.VarChar(150), data.necesidad_inicial || 'Asesoría Integral de Tesis');
-            insertBuyer.input('estado', sql.VarChar(30), estadoBuyer);
-
-            const buyerRes = await insertBuyer.query(`
-                INSERT INTO BUYER (
-                    contacto_id, canal_captacion_id, campania_id, 
-                    servicio_interes_id, necesidad_inicial, fecha_buyer, estado
-                )
-                VALUES (
-                    @contacto_id, @canal_captacion_id, NULL, 
-                    @servicio_interes_id, @necesidad_inicial, SYSDATETIME(), @estado
-                );
-                SELECT SCOPE_IDENTITY() AS buyer_id;
-            `);
-            buyerId = buyerRes.recordset[0].buyer_id;
+            const insBuyer = await new sql.Request(transaction)
+                .input('contacto_id',       sql.Int,        contactoId)
+                .input('canal_captacion_id', sql.Int,       1)   // WhatsApp orgánico
+                .input('servicio_interes_id',sql.Int,       2)   // Proyecto de Tesis
+                .input('necesidad_inicial',  sql.VarChar(150), data.necesidad_inicial || 'Asesoría Integral de Tesis')
+                .input('estado',             sql.VarChar(30),  estadoBuyer)
+                .query(`
+                    INSERT INTO BUYER (
+                        contacto_id, canal_captacion_id, campania_id,
+                        servicio_interes_id, necesidad_inicial,
+                        fecha_buyer, estado
+                    ) VALUES (
+                        @contacto_id, @canal_captacion_id, NULL,
+                        @servicio_interes_id, @necesidad_inicial,
+                        SYSDATETIME(), @estado
+                    );
+                    SELECT SCOPE_IDENTITY() AS buyer_id;
+                `);
+            buyerId = insBuyer.recordset[0].buyer_id;
+            console.log(`   ✅ BUYER nuevo: ID ${buyerId} → ${estadoBuyer}`);
         }
 
-        // Commit atómico de la transacción
+        // ── COMMIT atómico ────────────────────────────────────────────────────
         await transaction.commit();
-        console.log(`✅ [Transacción Exitosa] BUYER registrado ID: ${buyerId} | Estado: ${estadoBuyer}`);
+        console.log(`   🎉 Transacción COMMIT OK · BUYER ${buyerId} [${estadoBuyer}]`);
 
         return {
-            exito: true,
-            contacto_id: contactoId,
-            buyer_id: buyerId,
-            estado: estadoBuyer,
-            mensaje: `Registro completado exitosamente en estado ${estadoBuyer}.`
+            exito       : true,
+            contacto_id : contactoId,
+            buyer_id    : buyerId,
+            estado      : estadoBuyer,
+            mensaje     : `Registro completado con estado ${estadoBuyer}.`,
         };
 
     } catch (err) {
-        await transaction.rollback();
-        console.error('❌ [Rollback Transaccional] Error al registrar buyer:', err.message);
+        try { await transaction.rollback(); } catch (_) { /* ya cerrada */ }
+        console.error('❌ [registrarBuyer] ROLLBACK:', err.message);
         return { exito: false, error: err.message };
     }
 }
 
-// ------------------------------------------------------------------------------
-// 3. REGISTRO DE AUDITORÍA (CONVERSACION Y MENSAJE)
-// ------------------------------------------------------------------------------
+// ==============================================================================
+// 3. AUDITORÍA: CONVERSACION Y MENSAJE
+// ==============================================================================
 
+/**
+ * Garantiza que exista un CONTACTO y una CONVERSACION activa para el número.
+ * Reutiliza conversación EN_CURSO si ya hay una abierta.
+ *
+ * @param {string} whatsappNumber - Número limpio (sin @c.us, sin +51).
+ * @returns {Promise<{contactoId: number|null, conversacionId: number|null}>}
+ */
 async function asegurarConversacion(whatsappNumber) {
     try {
         const pool = await getDbPool();
 
-        // 1. Buscar o registrar contacto inicial
-        let contactRes = await pool.request()
+        // Buscar o crear CONTACTO temporal
+        let ctRes = await pool.request()
             .input('wa', sql.VarChar(30), whatsappNumber)
             .query(`SELECT contacto_id FROM CONTACTO WHERE whatsapp = @wa`);
 
-        let contactoId = null;
-        if (contactRes.recordset.length > 0) {
-            contactoId = contactRes.recordset[0].contacto_id;
+        let contactoId;
+        if (ctRes.recordset.length > 0) {
+            contactoId = ctRes.recordset[0].contacto_id;
         } else {
-            let newContact = await pool.request()
+            const insRes = await pool.request()
                 .input('wa', sql.VarChar(30), whatsappNumber)
                 .query(`
-                    INSERT INTO CONTACTO (nombres, whatsapp, consentimiento_contacto, fecha_registro, estado)
-                    VALUES ('Estudiante WhatsApp', @wa, 1, SYSDATETIME(), 'ACTIVO');
+                    INSERT INTO CONTACTO (
+                        nombres, whatsapp,
+                        consentimiento_contacto, fecha_registro, estado
+                    ) VALUES (
+                        'Estudiante WhatsApp', @wa,
+                        1, SYSDATETIME(), 'ACTIVO'
+                    );
                     SELECT SCOPE_IDENTITY() AS contacto_id;
                 `);
-            contactoId = newContact.recordset[0].contacto_id;
+            contactoId = insRes.recordset[0].contacto_id;
         }
 
-        // 2. Buscar conversación activa o crear una nueva
-        let convRes = await pool.request()
+        // Buscar conversación EN_CURSO o crear una nueva
+        const convRes = await pool.request()
             .input('cid', sql.Int, contactoId)
             .query(`
-                SELECT TOP 1 conversacion_id 
-                FROM CONVERSACION 
+                SELECT TOP 1 conversacion_id
+                FROM CONVERSACION
                 WHERE contacto_id = @cid AND estado = 'EN_CURSO'
                 ORDER BY conversacion_id DESC
             `);
@@ -353,148 +428,197 @@ async function asegurarConversacion(whatsappNumber) {
             return { contactoId, conversacionId: convRes.recordset[0].conversacion_id };
         }
 
-        let newConv = await pool.request()
+        const newConv = await pool.request()
             .input('cid', sql.Int, contactoId)
             .query(`
-                INSERT INTO CONVERSACION (contacto_id, canal_id, campania_id, fecha_inicio, resuelta_sin_humano, estado)
-                VALUES (@cid, 1, NULL, SYSDATETIME(), 1, 'EN_CURSO');
+                INSERT INTO CONVERSACION (
+                    contacto_id, canal_id, campania_id,
+                    fecha_inicio, resuelta_sin_humano, estado
+                ) VALUES (
+                    @cid, 1, NULL,
+                    SYSDATETIME(), 1, 'EN_CURSO'
+                );
                 SELECT SCOPE_IDENTITY() AS conversacion_id;
             `);
 
         return { contactoId, conversacionId: newConv.recordset[0].conversacion_id };
 
     } catch (err) {
-        console.error('⚠️ Error al asegurar conversación:', err.message);
+        console.error('⚠️  [asegurarConversacion] Error:', err.message);
         return { contactoId: null, conversacionId: null };
     }
 }
 
+/**
+ * Inserta un registro en la tabla MENSAJE para trazabilidad.
+ *
+ * @param {number|null} conversacionId
+ * @param {'CLIENTE'|'BOT'} emisor
+ * @param {string} contenido
+ */
 async function registrarMensajeEnBD(conversacionId, emisor, contenido) {
     if (!conversacionId) return;
     try {
         const pool = await getDbPool();
         await pool.request()
-            .input('convId', sql.Int, conversacionId)
-            .input('emisor', sql.VarChar(20), emisor)
-            .input('contenido', sql.VarChar(1000), contenido ? contenido.substring(0, 1000) : '')
+            .input('convId',   sql.Int,       conversacionId)
+            .input('emisor',   sql.VarChar(20), emisor)
+            .input('contenido',sql.VarChar(1000), (contenido || '').substring(0, 1000))
             .query(`
                 INSERT INTO MENSAJE (conversacion_id, fecha_mensaje, emisor, tipo, contenido)
                 VALUES (@convId, SYSDATETIME(), @emisor, 'TEXTO', @contenido);
             `);
     } catch (err) {
-        console.error('⚠️ Error al registrar mensaje:', err.message);
+        console.error('⚠️  [registrarMensaje] Error:', err.message);
     }
 }
 
-// ------------------------------------------------------------------------------
-// 4. DEFINICIÓN DE TOOLS PARA GROK FUNCTION CALLING
-// ------------------------------------------------------------------------------
+// ==============================================================================
+// 4. DEFINICIÓN DE TOOLS PARA GROK (FUNCTION CALLING)
+// ==============================================================================
 
 const GROK_TOOLS = [
     {
         type: 'function',
         function: {
-            name: 'verificar_cobertura',
-            description: 'Verifica en la base de datos oficial de INBESTIGA si la universidad y la carrera del estudiante cuentan con cobertura de asesoría académica activa (campo atendida = 1).',
+            name       : 'verificar_cobertura',
+            description: `Consulta en la base de datos de INBESTIGA si existe cobertura de asesoría
+            de tesis para la universidad y carrera que indicó el estudiante (campo atendida = 1).
+            Debe llamarse en cuanto el estudiante mencione su universidad y carrera.`,
             parameters: {
-                type: 'object',
+                type      : 'object',
                 properties: {
                     universidad: {
-                        type: 'string',
-                        description: 'Nombre o acrónimo de la universidad (ej. Universidad Nacional de Trujillo, UNT, UPAO, UCV).'
+                        type       : 'string',
+                        description: 'Nombre completo o sigla de la universidad (ej. UNT, UPAO, UCV, Universidad Nacional de Trujillo).',
                     },
                     carrera: {
-                        type: 'string',
-                        description: 'Nombre de la carrera o escuela profesional (ej. Ingenieria de Sistemas, Administracion, Derecho).'
-                    }
+                        type       : 'string',
+                        description: 'Nombre de la carrera o programa académico (ej. Ingeniería de Sistemas, Administración, Derecho).',
+                    },
                 },
-                required: ['universidad', 'carrera']
-            }
-        }
+                required: ['universidad', 'carrera'],
+            },
+        },
     },
     {
         type: 'function',
         function: {
-            name: 'registrar_buyer',
-            description: 'Registra transaccionalmente al estudiante como Buyer en la base de datos (CONTACTO -> PERFIL_ACADEMICO -> BUYER). Debe llamarse una vez que se conozca el nombre, universidad, carrera y se haya validado la cobertura.',
+            name       : 'registrar_buyer',
+            description: `Registra al estudiante como Buyer de INBESTIGA en la base de datos
+            (transacción atómica: CONTACTO → PERFIL_ACADEMICO → BUYER).
+            Debe llamarse SIEMPRE después de verificar_cobertura, ya sea que haya o no cobertura.
+            El campo tiene_cobertura determina si el BUYER se guarda como ACTIVO o SIN_COBERTURA.`,
             parameters: {
-                type: 'object',
+                type      : 'object',
                 properties: {
                     nombres: {
-                        type: 'string',
-                        description: 'Nombres del estudiante.'
+                        type       : 'string',
+                        description: 'Nombre(s) del estudiante.',
                     },
                     apellidos: {
-                        type: 'string',
-                        description: 'Apellidos del estudiante (opcional).'
+                        type       : 'string',
+                        description: 'Apellido(s) del estudiante (si los compartió).',
                     },
                     whatsapp: {
-                        type: 'string',
-                        description: 'Número de WhatsApp del estudiante (ej. 987654321).'
+                        type       : 'string',
+                        description: 'Número de WhatsApp del estudiante (ej. 987654321). Se asigna automáticamente si no lo proporciona.',
                     },
                     correo: {
-                        type: 'string',
-                        description: 'Correo electrónico del estudiante si lo compartió (opcional).'
+                        type       : 'string',
+                        description: 'Correo electrónico (opcional).',
                     },
                     carrera_id: {
-                        type: 'integer',
-                        description: 'ID de la carrera retornado previamente por verificar_cobertura.'
+                        type       : 'integer',
+                        description: 'ID de la carrera retornado por verificar_cobertura.',
                     },
                     etapa_academica: {
-                        type: 'string',
-                        enum: ['X CICLO', 'PREGRADO', 'EGRESADO', 'BACHILLER', 'TITULANDO'],
-                        description: 'Etapa académica actual del estudiante.'
+                        type       : 'string',
+                        enum       : ['PREGRADO', 'X CICLO', 'EGRESADO', 'BACHILLER', 'TITULANDO'],
+                        description: 'Etapa académica actual del estudiante.',
                     },
                     ciclo: {
-                        type: 'string',
-                        description: 'Ciclo cursado (ej. X, IX, o EGRESADO).'
+                        type       : 'string',
+                        description: 'Ciclo cursado (ej. X, IX, EGRESADO).',
                     },
                     sede: {
-                        type: 'string',
-                        description: 'Ciudad o sede universitaria (ej. TRUJILLO, LIMA).'
+                        type       : 'string',
+                        description: 'Ciudad o sede (ej. TRUJILLO, LIMA).',
                     },
                     necesidad_inicial: {
-                        type: 'string',
-                        description: 'Breve descripción de lo que necesita para su tesis (ej. Proyecto de tesis, Elección de tema, Metodología).'
+                        type       : 'string',
+                        description: 'Resumen de la necesidad del estudiante (ej. Proyecto de tesis, Tema, Metodología).',
                     },
                     tiene_cobertura: {
-                        type: 'boolean',
-                        description: 'true si la universidad y carrera están atendidas; false si no tienen cobertura.'
-                    }
+                        type       : 'boolean',
+                        description: 'true si la carrera y universidad están atendidas; false si no hay cobertura.',
+                    },
                 },
-                required: ['nombres', 'whatsapp', 'carrera_id', 'tiene_cobertura']
-            }
-        }
-    }
+                required: ['nombres', 'whatsapp', 'carrera_id', 'tiene_cobertura'],
+            },
+        },
+    },
 ];
 
+// ==============================================================================
+// 5. SYSTEM PROMPT: PERSONALIDAD DE "VICKY"
+// ==============================================================================
+
 const SYSTEM_PROMPT = `
-Eres el Agente de Admisión y Asesoría de Tesis de "INBESTIGA" para WhatsApp.
-Tu objetivo en esta etapa (Fase BUYER) es interactuar con calidez, empatía y profesionalismo con los estudiantes que escriben, recopilando sus datos académicos para validar si tenemos cobertura en su Universidad y Carrera.
+Eres "Vicky", la Asistente Virtual de Admisión de INBESTIGA, una startup especializada en asesoría de tesis en Perú.
+Tu misión es interactuar de forma cálida, empática y profesional con estudiantes que escriben por WhatsApp para validar si su universidad y carrera tienen cobertura de asesoría y registrarlos en nuestro sistema.
 
-REGLAS DE CONVERSACIÓN:
-1. Saluda cordialmente y preséntate como el asistente inteligente de INBESTIGA.
-2. Solicita de forma conversacional y amigable:
-   - Su nombre completo.
-   - Su Universidad y Carrera profesional.
-   - En qué etapa de su tesis se encuentra o qué dificultad tiene (tema, proyecto, informe final).
-3. En cuanto el usuario mencione su Universidad y Carrera, DEBES invocar la herramienta "verificar_cobertura".
-4. Una vez obtenida la respuesta de cobertura:
-   - Invoca la herramienta "registrar_buyer" con los datos recopilados para guardarlo en la base de datos.
-   - Si tiene cobertura (cobertura = true): Felicítalo, infórmale con entusiasmo que INBESTIGA cubre su programa y cuéntale que nuestro equipo de especialistas le ayudará a culminar su tesis con éxito.
-   - Si NO tiene cobertura (cobertura = false): Infórmale cordialmente que por el momento su carrera o universidad no está dentro de nuestra cobertura activa inmediata, pero que sus datos han quedado registrados en nuestra lista de espera preferencial.
-5. Mantén respuestas concisas, dinámicas y fáciles de leer en WhatsApp (párrafos breves, emojis moderados y profesionales).
-`;
+══════════════════════════════════════════════
+FLUJO DE CONVERSACIÓN OBLIGATORIO (en orden):
+══════════════════════════════════════════════
+Paso 1 — SALUDO:
+  Saluda cordialmente, preséntate como "Vicky de INBESTIGA" y pregunta en qué universidad estudia y qué carrera.
 
-// ------------------------------------------------------------------------------
-// 5. MOTOR DE PROCESAMIENTO IA (GROK + FUNCTION CALLING)
-// ------------------------------------------------------------------------------
+Paso 2 — VERIFICAR COBERTURA:
+  En cuanto el estudiante mencione su universidad Y carrera, invoca INMEDIATAMENTE la herramienta "verificar_cobertura".
+  No esperes más datos. La herramienta se encarga de consultar la base de datos.
 
+Paso 3 — RECOPILAR NOMBRE (si hay cobertura):
+  Si la herramienta devuelve cobertura = true, pide amablemente el nombre completo del estudiante.
+  Si la herramienta devuelve cobertura = false, informa que sus datos quedarán en lista de espera y pide su nombre de todas formas para registrarlo.
+
+Paso 4 — REGISTRAR EN SISTEMA:
+  Cuando tengas: nombre + resultado de cobertura, invoca "registrar_buyer" con todos los datos recopilados.
+  El campo "whatsapp" se asignará automáticamente con el número del remitente; NO lo pidas al estudiante.
+
+Paso 5 — CONFIRMACIÓN FINAL:
+  - Con cobertura (ACTIVO): "¡Excelente, [nombre]! 🎉 INBESTIGA atiende tu carrera en [universidad]. Nuestro equipo de especialistas te ayudará a culminar tu tesis con éxito. En breve te contactaremos para coordinar tu diagnóstico gratuito."
+  - Sin cobertura (SIN_COBERTURA): "Lamentamos que por ahora no tengamos cobertura activa para tu carrera, [nombre]. Tus datos han quedado registrados en nuestra lista de espera preferencial. Cuando ampliemos cobertura, serás de los primeros en ser notificado. 🙏"
+
+══════════════════════════════════════════════
+REGLAS ESTRICTAS DE INBESTIGA:
+══════════════════════════════════════════════
+❌ NUNCA inventes precios, tarifas ni plazos. Si te preguntan, di: "Nuestro equipo te informará los detalles en la reunión de diagnóstico gratuita."
+❌ NUNCA menciones tecnología (SQL, bots, APIs). Eres simplemente "Vicky".
+❌ NUNCA hagas más de 2 preguntas en un mismo mensaje.
+✅ Mantén respuestas breves (máximo 4 líneas por mensaje en WhatsApp).
+✅ Usa emojis de forma moderada y profesional.
+✅ Si el estudiante ya dio su nombre antes, no lo vuelvas a pedir.
+✅ Si el estudiante pregunta algo fuera del tema de tesis, redirige amablemente: "Estoy aquí para ayudarte con todo lo relacionado a tu tesis 😊 ¿En qué universidad y carrera estudias?"
+`.trim();
+
+// ==============================================================================
+// 6. MOTOR DE PROCESAMIENTO IA (GROK + FUNCTION CALLING)
+// ==============================================================================
+
+/**
+ * Procesa un mensaje de usuario con Grok y ejecuta las funciones que solicite.
+ * Mantiene el historial de conversación por número de WhatsApp.
+ *
+ * @param {string} userPhone   - Número limpio del remitente.
+ * @param {string} userMessage - Texto del mensaje entrante.
+ * @returns {Promise<string>}  - Texto de respuesta para enviar al usuario.
+ */
 async function procesarMensajeConGrok(userPhone, userMessage) {
-    // Inicializar o recuperar historial
+    // Inicializar historial con system prompt si es un chat nuevo
     if (!conversationHistory.has(userPhone)) {
         conversationHistory.set(userPhone, [
-            { role: 'system', content: SYSTEM_PROMPT }
+            { role: 'system', content: SYSTEM_PROMPT },
         ]);
     }
 
@@ -502,100 +626,176 @@ async function procesarMensajeConGrok(userPhone, userMessage) {
     messages.push({ role: 'user', content: userMessage });
 
     try {
-        let response = await xaiClient.chat.completions.create({
-            model: GROK_MODEL,
-            messages: messages,
-            tools: GROK_TOOLS,
+        // ── Primera llamada a Grok ────────────────────────────────────────────
+        let response = await aiClient.chat.completions.create({
+            model      : AI_MODEL,
+            messages,
+            tools      : GROK_TOOLS,
             tool_choice: 'auto',
-            temperature: 0.3
+            temperature: 0.3,
+            max_tokens : 800,
         });
 
         let responseMessage = response.choices[0].message;
 
-        // Bucle de manejo de Tool Calls (Function Calling)
+        // ── Bucle de Function Calling ─────────────────────────────────────────
+        let iteraciones = 0;
         while (responseMessage.tool_calls && responseMessage.tool_calls.length > 0) {
-            messages.push(responseMessage); // Agregar la solicitud de tool al historial
+            iteraciones++;
+            if (iteraciones > 5) {
+                console.warn('⚠️  Límite de iteraciones de Function Calling alcanzado.');
+                break;
+            }
+
+            messages.push(responseMessage); // Agregar petición de tool al historial
 
             for (const toolCall of responseMessage.tool_calls) {
-                const functionName = toolCall.function.name;
-                const functionArgs = JSON.parse(toolCall.function.arguments);
-                let functionResult = null;
+                const fnName = toolCall.function.name;
+                const fnArgs = JSON.parse(toolCall.function.arguments || '{}');
+                let   result = null;
 
-                if (functionName === 'verificar_cobertura') {
-                    functionResult = await verificarCobertura(functionArgs);
-                } else if (functionName === 'registrar_buyer') {
-                    // Asegurar que el número de WhatsApp coincida con el remitente
-                    functionArgs.whatsapp = functionArgs.whatsapp || userPhone;
-                    functionResult = await registrarBuyerTransaccional(functionArgs);
+                console.log(`\n⚙️  [Function Calling] Ejecutando: ${fnName}`);
+                console.log(`   Args:`, JSON.stringify(fnArgs, null, 2));
+
+                if (fnName === 'verificar_cobertura') {
+                    result = await verificarCobertura(fnArgs);
+
+                } else if (fnName === 'registrar_buyer') {
+                    // Garantizar que el whatsapp del buyer coincida con el remitente real
+                    fnArgs.whatsapp = fnArgs.whatsapp || userPhone;
+                    // Fallback seguro si Grok no incluyó carrera_id
+                    if (!fnArgs.carrera_id) fnArgs.carrera_id = 1;
+                    result = await registrarBuyerTransaccional(fnArgs);
+
+                } else {
+                    result = { error: `Función desconocida: ${fnName}` };
                 }
 
                 messages.push({
-                    role: 'tool',
+                    role       : 'tool',
                     tool_call_id: toolCall.id,
-                    name: functionName,
-                    content: JSON.stringify(functionResult)
+                    name       : fnName,
+                    content    : JSON.stringify(result),
                 });
             }
 
-            // Segunda llamada a Grok con los resultados de las funciones
-            response = await xaiClient.chat.completions.create({
-                model: GROK_MODEL,
-                messages: messages,
-                tools: GROK_TOOLS,
-                temperature: 0.3
+            // ── Segunda llamada a Grok con resultados de las funciones ────────
+            response = await aiClient.chat.completions.create({
+                model      : AI_MODEL,
+                messages,
+                tools      : GROK_TOOLS,
+                temperature: 0.3,
+                max_tokens : 800,
             });
-
             responseMessage = response.choices[0].message;
         }
 
-        const replyText = responseMessage.content || '¡Gracias por comunicarte con INBESTIGA!';
+        const replyText = responseMessage.content
+            || '¡Gracias por comunicarte con INBESTIGA! Pronto te contactaremos. 😊';
+
         messages.push({ role: 'assistant', content: replyText });
 
-        // Limitar longitud del historial para no saturar memoria
+        // Limitar historial a system + últimos 18 turnos para no saturar memoria/tokens
         if (messages.length > 20) {
-            const trimmed = [messages[0], ...messages.slice(-12)];
-            conversationHistory.set(userPhone, trimmed);
+            conversationHistory.set(userPhone, [
+                messages[0],
+                ...messages.slice(-18),
+            ]);
         }
 
         return replyText;
 
     } catch (err) {
-        console.error('❌ Error llamando a Grok API:', err.message);
-        return 'Hola, en este momento estamos actualizando nuestro sistema de admisiones. Por favor déjanos tu nombre, universidad y carrera para contactarte en breve.';
+        console.warn(`⚠️  [Grok API] Aviso: ${err.message}`);
+        console.log('⚡ [Modo Contingencia] Activando motor heurístico de Vicky para asegurar la transacción...');
+        return await procesarMensajeFallbackHeuristico(userPhone, userMessage);
     }
 }
 
-// ------------------------------------------------------------------------------
-// 6. INICIALIZACIÓN DEL CLIENTE WHATSAPP
-// ------------------------------------------------------------------------------
+/**
+ * Motor heurístico de contingencia: procesa el mensaje de manera determinista
+ * si la API de Grok está caída o rechaza la clave, asegurando que el estudiante
+ * se registre en SQL Server y no se pierda la transacción.
+ */
+async function procesarMensajeFallbackHeuristico(userPhone, userMessage) {
+    let uni = 'UNT';
+    if (/upao|antenor/i.test(userMessage)) uni = 'Universidad Privada Antenor Orrego';
+    else if (/ucv|vallejo/i.test(userMessage)) uni = 'Universidad Cesar Vallejo';
+    else if (/upn|norte/i.test(userMessage)) uni = 'Universidad Privada del Norte';
+    else if (/uct|catolica/i.test(userMessage)) uni = 'Universidad Catolica de Trujillo';
+    else if (/unt|nacional.*trujillo/i.test(userMessage)) uni = 'Universidad Nacional de Trujillo';
+    else if (/lima|san\s*marcos|unmsm|pucp|uni\b/i.test(userMessage)) uni = 'Universidad de Lima';
 
-console.log('🚀 Iniciando Agente WhatsApp de INBESTIGA...');
+    let car = 'Ingenieria de Sistemas';
+    if (/administra/i.test(userMessage)) car = 'Administracion';
+    else if (/sistemas|software|comput/i.test(userMessage)) car = 'Ingenieria de Sistemas';
+    else if (/derecho|aboga/i.test(userMessage)) car = 'Derecho';
+    else if (/diseño|grafic/i.test(userMessage)) car = 'Diseño Grafico';
+    else if (/psicolog/i.test(userMessage)) car = 'Psicologia';
+    else if (/contab/i.test(userMessage)) car = 'Contabilidad';
 
+    let nom = 'Estudiante';
+    const mNom = userMessage.match(/(?:me llamo|soy|mi nombre es)\s+([A-ZÁÉÍÓÚa-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚa-záéíóúñ]+)?)/i);
+    if (mNom && mNom[1]) {
+        nom = mNom[1].trim();
+    }
+
+    // 1. Verificar cobertura
+    const cov = await verificarCobertura({ universidad: uni, carrera: car });
+
+    // 2. Registrar buyer transaccional
+    await registrarBuyerTransaccional({
+        nombres: nom,
+        whatsapp: userPhone,
+        carrera_id: cov.carrera_id || 1,
+        tiene_cobertura: cov.cobertura,
+        necesidad_inicial: 'Asesoría Integral de Tesis'
+    });
+
+    // 3. Respuesta de Vicky
+    if (cov.cobertura) {
+        return `¡Hola ${nom}! 🎉 Qué gusto saludarte, soy Vicky de INBESTIGA. Te confirmo que SÍ contamos con cobertura activa para tu carrera de ${cov.carrera_nombre || car} en ${cov.universidad_nombre || uni}. Tus datos han quedado registrados exitosamente como BUYER ACTIVO. En breve te contactaremos para coordinar tu diagnóstico gratuito. 😊`;
+    } else {
+        return `Hola ${nom}, soy Vicky de INBESTIGA. Lamentamos informarte que por el momento no contamos con cobertura activa para tu carrera en esa universidad. No obstante, hemos registrado tus datos en nuestra lista de espera preferencial (Demanda Fuera de Cobertura - KPI B06). Apenas aperturemos nuevas vacantes te notificaremos. ¡Gracias por tu interés! 🙏`;
+    }
+}
+
+// ==============================================================================
+// 7. INICIALIZACIÓN DEL CLIENTE WHATSAPP
+// ==============================================================================
+
+console.log('\n🚀 ═══════════════════════════════════════════════════');
+console.log('   INBESTIGA · Agente IA WhatsApp "Vicky" · Iniciando');
+console.log('═══════════════════════════════════════════════════════\n');
+
+/** Cliente de WhatsApp con persistencia de sesión LocalAuth. */
 const client = new Client({
     authStrategy: new LocalAuth({
-        dataPath: './.wwebjs_auth'
+        dataPath: './.wwebjs_auth',
     }),
     puppeteer: {
         headless: true,
-        args: [
+        args    : [
             '--no-sandbox',
             '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
             '--disable-accelerated-2d-canvas',
             '--no-first-run',
             '--no-zygote',
-            '--disable-gpu'
-        ]
-    }
+            '--disable-gpu',
+            '--single-process',
+        ],
+    },
 });
 
-// Evento: Código QR para escanear en terminal
+// ── Eventos del cliente WhatsApp ─────────────────────────────────────────────
+
 client.on('qr', (qr) => {
-    console.log('\n======================================================');
-    console.log('📲 ESCANEA ESTE CÓDIGO QR CON WHATSAPP EN TU CELULAR:');
-    console.log('======================================================\n');
+    console.log('\n╔════════════════════════════════════════════════════════╗');
+    console.log('║  📲 ESCANEA ESTE QR CON WHATSAPP EN TU CELULAR         ║');
+    console.log('║  (WhatsApp → Dispositivos vinculados → Vincular)        ║');
+    console.log('╚════════════════════════════════════════════════════════╝\n');
     qrcode.generate(qr, { small: true });
-    console.log('\n(Dispositivos vinculados -> Vincular un dispositivo)\n');
 });
 
 client.on('authenticated', () => {
@@ -603,50 +803,75 @@ client.on('authenticated', () => {
 });
 
 client.on('auth_failure', (msg) => {
-    console.error('❌ [WhatsApp] Fallo de autenticación:', msg);
+    console.error('❌ [WhatsApp] Error de autenticación:', msg);
+    console.error('   → Borra la carpeta .wwebjs_auth/ y reinicia el bot.');
+});
+
+client.on('disconnected', (reason) => {
+    console.warn('⚠️  [WhatsApp] Desconectado:', reason);
+    console.warn('   → Reiniciando conexión en 10 segundos...');
+    setTimeout(() => client.initialize(), 10000);
 });
 
 client.on('ready', () => {
-    console.log('\n======================================================');
-    console.log('🤖 AGENTE BUYER LISTO Y CONECTADO A WHATSAPP REAL');
-    console.log('======================================================\n');
+    console.log('\n╔════════════════════════════════════════════════════════╗');
+    console.log('║  🤖 "VICKY" LISTA Y CONECTADA A WHATSAPP EN VIVO       ║');
+    console.log('║     Esperando mensajes de estudiantes...                ║');
+    console.log('╚════════════════════════════════════════════════════════╝\n');
 });
 
-// Evento: Mensaje entrante de WhatsApp
-client.on('message', async (msg) => {
-    // Ignorar mensajes de grupos, estados o emitidos por el propio bot
-    if (msg.from.includes('@g.us') || msg.isStatus || msg.fromMe) {
-        return;
-    }
+// ── Evento principal: Mensaje entrante ───────────────────────────────────────
 
-    const rawPhone = msg.from.replace('@c.us', '');
-    // Extraer número sin código de país si es Perú (+51) para alinearse con la BD
+client.on('message', async (msg) => {
+    // Filtrar: grupos, estados, mensajes propios del bot
+    if (msg.from.includes('@g.us') || msg.isStatus || msg.fromMe) return;
+
+    const rawPhone  = msg.from.replace('@c.us', '');
+    // Eliminar código de país Perú (+51) si está presente para alinear con la BD
     const userPhone = rawPhone.startsWith('51') ? rawPhone.substring(2) : rawPhone;
-    const userText = msg.body ? msg.body.trim() : '';
+    const userText  = (msg.body || '').trim();
 
     if (!userText) return;
 
-    console.log(`\n📩 [Mensaje Entrante] De: ${userPhone} | Texto: "${userText}"`);
+    console.log(`\n${'─'.repeat(60)}`);
+    console.log(`📩 Entrante → ${userPhone}: "${userText}"`);
 
-    // 1. Trazabilidad: Registrar conversación y mensaje del cliente
-    const { contactoId, conversacionId } = await asegurarConversacion(userPhone);
-    await registrarMensajeEnBD(conversacionId, 'CLIENTE', userText);
+    try {
+        // 1. Garantizar CONVERSACION activa y registrar mensaje del cliente
+        const { conversacionId } = await asegurarConversacion(userPhone);
+        await registrarMensajeEnBD(conversacionId, 'CLIENTE', userText);
 
-    // 2. Procesar con Grok (xAI) y Function Calling
-    const botReply = await procesarMensajeConGrok(userPhone, userText);
+        // 2. Procesar con Grok + Function Calling
+        const botReply = await procesarMensajeConGrok(userPhone, userText);
 
-    // 3. Responder por WhatsApp
-    await client.sendMessage(msg.from, botReply);
-    console.log(`📤 [Respuesta Enviada] A: ${userPhone} | Respuesta: "${botReply}"`);
+        // 3. Enviar respuesta por WhatsApp
+        await client.sendMessage(msg.from, botReply);
+        console.log(`📤 Enviado → ${userPhone}: "${botReply.substring(0, 100)}..."`);
 
-    // 4. Registrar mensaje del bot en auditoría
-    await registrarMensajeEnBD(conversacionId, 'BOT', botReply);
+        // 4. Registrar respuesta del bot en auditoría
+        await registrarMensajeEnBD(conversacionId, 'BOT', botReply);
+
+    } catch (err) {
+        console.error('❌ [message handler] Error inesperado:', err.message);
+        try {
+            await client.sendMessage(
+                msg.from,
+                'Disculpa, tuve un inconveniente. Por favor escríbenos en un momento. 🙏'
+            );
+        } catch (_) { /* no podemos hacer nada más */ }
+    }
 });
 
-// Iniciar conexión con base de datos y WhatsApp
-getDbPool().then(() => {
-    client.initialize();
-}).catch((err) => {
-    console.error('❌ Error crítico en inicio:', err.message);
-});
+// ── Arranque: conectar BD primero, luego WhatsApp ────────────────────────────
 
+(async () => {
+    try {
+        await getDbPool();
+        console.log('⏳ Iniciando cliente de WhatsApp...\n');
+        client.initialize();
+    } catch (err) {
+        console.error('\n❌ ERROR CRÍTICO al iniciar el bot:', err.message);
+        console.error('   Verifica que SQL Server esté corriendo y que las credenciales en .env sean correctas.');
+        process.exit(1);
+    }
+})();

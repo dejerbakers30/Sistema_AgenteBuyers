@@ -21,20 +21,29 @@ print("=" * 70)
 
 # 1. Verificar variables de entorno
 print("\n[1/4] Verificando variables de entorno en .env...")
-required_vars = [
+required_db_vars = [
     "DB_SERVER", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD",
-    "DB_ODBC_DRIVER", "XAI_API_KEY"
+    "DB_ODBC_DRIVER"
 ]
 
 missing_vars = []
-for var in required_vars:
+for var in required_db_vars:
     val = os.getenv(var)
-    if not val or "tu-api-key" in val:
+    if not val:
         missing_vars.append(var)
     else:
-        # Enmascarar contraseña y API Key
-        disp = "***" if "PASSWORD" in var or "KEY" in var else val
+        disp = "***" if "PASSWORD" in var else val
         print(f"  ✅ {var}: {disp}")
+
+# Verificar key de IA (Gemini, Groq, xAI o genérica)
+ai_key = os.getenv("GEMINI_API_KEY") or os.getenv("AI_API_KEY") or os.getenv("GROQ_API_KEY") or os.getenv("XAI_API_KEY")
+if ai_key and "tu-api-key" not in ai_key:
+    provider = "Google Gemini" if (os.getenv("GEMINI_API_KEY") or ai_key.startswith("AIza")) else (
+               "Groq" if (os.getenv("GROQ_API_KEY") or ai_key.startswith("gsk_")) else "xAI / Grok"
+    )
+    print(f"  ✅ IA API Key detectada para [{provider}]: *** (Longitud: {len(ai_key)})")
+else:
+    missing_vars.append("GEMINI_API_KEY (o AI_API_KEY / XAI_API_KEY)")
 
 if missing_vars:
     print(f"  ⚠️ Variables pendientes o con valores por defecto: {', '.join(missing_vars)}")
@@ -58,7 +67,8 @@ port = os.getenv("DB_PORT", "1433")
 database = os.getenv("DB_NAME", "INBESTIGA_TESIS")
 user = os.getenv("DB_USER", "sa")
 password = os.getenv("DB_PASSWORD", "")
-trust_cert = os.getenv("DB_TRUST_SERVER_CERTIFICATE", "yes")
+trust_cert_raw = os.getenv("DB_TRUST_SERVER_CERTIFICATE", "yes").lower()
+trust_cert = "yes" if trust_cert_raw in ["true", "yes", "1"] else "no"
 
 conn_str = (
     f"DRIVER={{{selected_driver}}};"
@@ -75,7 +85,19 @@ tablas_requeridas = [
 ]
 
 try:
-    conn = pyodbc.connect(conn_str, timeout=4)
+    try:
+        conn = pyodbc.connect(conn_str, timeout=3)
+    except Exception:
+        # Fallback a Shared Memory / Local sin especificar puerto
+        conn_str_local = (
+            f"DRIVER={{{selected_driver}}};"
+            f"SERVER=(local);"
+            f"DATABASE={database};"
+            f"UID={user};"
+            f"PWD={password};"
+            f"TrustServerCertificate={trust_cert};"
+        )
+        conn = pyodbc.connect(conn_str_local, timeout=4)
     cursor = conn.cursor()
     print("  ✅ Conexión establecida exitosamente con el motor SQL Server.")
 
