@@ -1,202 +1,208 @@
 # 🎓 INBESTIGA - Sistema Agente IA de Captación (Fase BUYER) & Dashboard BI
-
-Prototipo funcional end-to-end de la **Fase BUYER** para la startup de asesoría de tesis **INBESTIGA**. El sistema implementa un Agente IA en WhatsApp que califica prospectos universitarios, valida la cobertura de su universidad y carrera mediante Function Calling, ejecuta transacciones atómicas en SQL Server y alimenta en tiempo real un Dashboard de Inteligencia de Negocios en Streamlit.
+### Universidad Nacional de Trujillo · Escuela de Ingeniería de Sistemas
+**Curso:** Inteligencia de Negocios · **Ciclo:** VIII · **Caso de Negocio:** INBESTIGA (Asesoría de Tesis Universitaria)
 
 ---
 
-## 🏗️ 1. Arquitectura del Sistema
+## 📌 1. Contexto del Proyecto y Problemática de Negocio
 
-El prototipo opera en una arquitectura desacoplada de dos procesos concurrentes conectados a una única fuente de verdad transaccional (**OLTP**):
+### ¿Qué es INBESTIGA?
+**INBESTIGA** es una startup y centro especializado en consultoría, asesoría metodológica y estadística para el desarrollo de proyectos de tesis y artículos científicos en el Perú. 
+
+### El Problema de Negocio (Top of Funnel - ToFu)
+En el modelo comercial tradicional de asesoría académica, el primer punto de contacto de los estudiantes universitarios es **WhatsApp**. Anteriormente, los asesores de admisiones humanos debían:
+1. Responder saludos de forma manual.
+2. Preguntar repetitivamente datos básicos: nombre, universidad, carrera y etapa de la tesis.
+3. Consultar manualmente tablas o documentos internos de cobertura para saber si la empresa contaba con especialistas activos para esa universidad y carrera específica.
+4. Esta fricción causaba **tiempos de respuesta de 15 a 45 minutos**, pérdida de prospectos en horas no laborales (noches y fines de semana) y un desgaste operativo que restaba tiempo a la negociación comercial real.
+
+### La Solución Implementada: Agente IA "Vicky"
+Se diseñó e implementó un **Agente Inteligente de Admisión en WhatsApp ("Vicky")** conectado directamente al motor de base de datos relacional de la empresa y a un **Dashboard de Inteligencia de Negocios en Tiempo Real**.
+* **Atención 24/7 con latencia < 3 segundos.**
+* **Comprensión de Lenguaje Natural (NLU):** Entiende siglas peruanas (`UNT`, `UPAO`, `UCV`, `UPN`, `UNI`, `UNMSM`, `PUCP`), apodos y texto informal.
+* **Calificación Automatizada de Cobertura:** Ejecuta *Function Calling* contra SQL Server para verificar si la universidad y carrera están catalogadas como `atendida = 1`.
+* **Registro Transaccional Seguro:** Registra de inmediato al estudiante como **BUYER ACTIVO** (con cobertura) o en **LISTA DE ESPERA / SIN COBERTURA** (para detección de demanda insatisfecha - KPI B06).
+* **Trazabilidad Inmediata en Dashboard BI:** Cada mensaje y registro impacta al instante en un panel analítico en Streamlit con auto-refresco.
+
+---
+
+## 🏗️ 2. Arquitectura del Sistema de Extremo a Extremo
+
+El sistema funciona mediante una arquitectura desacoplada y orientada a eventos:
+
+```mermaid
+flowchart TD
+    subgraph CANAL["📱 Canal de Entrada"]
+        A["Estudiante Universitario\n(WhatsApp en vivo)"]
+    end
+
+    subgraph BACKEND["⚙️ Agente IA Backend (Node.js / Python)"]
+        B["whatsapp-web.js\n(Puppeteer + LocalAuth)"]
+        C["Motor IA (Gemini / Grok)\n(System Prompt + Function Calling)"]
+        D["Lógica de Herramientas\n(verificar_cobertura / registrar_buyer)"]
+    end
+
+    subgraph BD["🗄️ Base de Datos Transaccional (OLTP)"]
+        E[("SQL Server: INBESTIGA_TESIS\n(Tablas: CONTACTO, CARRERA,\nPERFIL, BUYER, CONVERSACION, MENSAJE)")]
+    end
+
+    subgraph BI["📊 Inteligencia de Negocios"]
+        F["Dashboard BI (Streamlit / Plotly)\n(Lectura en vivo cada 3s)"]
+        G["ETL / Data Mart Dimensional\n(INBESTIGA_MART - Análisis Histórico)"]
+    end
+
+    A <-->|Mensajes WhatsApp| B
+    B <-->|Historial y Prompts| C
+    C -->|Tool Calls| D
+    D <-->|Transacciones ACID / SQL| E
+    E -->|Consultas en Tiempo Real| F
+    E -.->|Script ETL 04| G
+```
+
+### Componentes del Stack Tecnológico:
+1. **WhatsApp Gateway:** `whatsapp-web.js` con emulación de navegador Chromium headless y persistencia de sesión cifrada (`LocalAuth`).
+2. **Cerebro Cognitivo (LLM):** Google Gemini (`gemini-2.5-flash`) / xAI Grok con soporte nativo de *Tools / Function Calling*.
+3. **Capa Transaccional (OLTP):** Microsoft SQL Server (`INBESTIGA_TESIS`), operando bajo transacciones atómicas seguras (`BEGIN TRANSACTION`, `COMMIT`, `ROLLBACK`).
+4. **Capa de Inteligencia de Negocios:** Streamlit + Plotly + Pandas con auto-recarga reactiva y visualización de KPIs comerciales.
+
+---
+
+## 🗄️ 3. Las Dos Bases de Datos del Proyecto: ¿Cuál hace qué?
+
+En la arquitectura de Inteligencia de Negocios existen dos bases de datos claramente diferenciadas:
 
 ```
-                                  ┌───────────────────────────────┐
-                                  │      xAI Grok API (LLM)       │
-                                  │  - Extracción de Entidades    │
-                                  │  - Function Calling (Tools)   │
-                                  └──────────────▲────────────────┘
-                                                 │ Tools Payload / Response
-                                                 ▼
-┌─────────────────────────┐             ┌─────────────────────────────────┐
-│     Estudiante          │  WhatsApp   │       Bot Node.js Backend       │
-│  (WhatsApp en Vivo)     │◄───────────►│       (whatsapp-web.js)         │
-└─────────────────────────┘             └────────────────┬────────────────┘
-                                                         │ Inserción Transaccional
-                                                         │ (CONTACTO -> PERFIL -> BUYER)
-                                                         ▼
-                                        ┌─────────────────────────────────┐
-                                        │    SQL Server (INBESTIGA_TESIS) │
-                                        │   Tablas: BUYER, CONTACTO,      │
-                                        │   PERFIL_ACADEMICO, CARRERA,    │
-                                        │   UNIVERSIDAD, MENSAJE, etc.    │
-                                        └────────────────┬────────────────┘
-                                                         │
-                                                         │ SELECT Directo en Tiempo Real
-                                                         │ (Auto-refresco cada 2-5s)
-                                                         ▼
-                                        ┌─────────────────────────────────┐
-                                        │    Dashboard BI (Streamlit)     │
-                                        │  - KPIs Ejecutivos              │
-                                        │  - Tasa de Cobertura            │
-                                        │  - Distribución por Carrera     │
-                                        │  - Auditoría de Conversaciones  │
-                                        └─────────────────────────────────┘
+┌────────────────────────────────────────────────────────┐      ┌────────────────────────────────────────────────────────┐
+│     1. BASE DE DATOS TRANSACCIONAL (OLTP)              │      │     2. DATA MART DIMENSIONAL (OLAP)                    │
+│     Nombre: INBESTIGA_TESIS                            │      │     Nombre: DATAMART_INBESTIGA                         │
+├────────────────────────────────────────────────────────┤      ├────────────────────────────────────────────────────────┤
+│ • Modelo Relacional Normalizado (3FN).                 │      │ • Esquema Estrella / Copo de Nieve (Kimball).          │
+│ • Optimizado para escrituras rápidas (INSERT/UPDATE).  │ ETL  │ • Optimizado para consultas analíticas pesadas.        │
+│ • Es la fuente viva de operaciones del negocio.        │─────►│ • 18 Dimensiones y 13 Tablas de Hechos.                │
+│ • El Bot de WhatsApp escribe aquí en vivo.             │ (04) │ • Alimentado periódicamente por el script ETL.         │
+│ • El Dashboard en vivo consulta aquí para latencia 0.  │      │ • Usado para tendencias históricas y minería.          │
+└────────────────────────────────────────────────────────┘      └────────────────────────────────────────────────────────┘
 ```
 
----
-
-## 💻 2. Stack Tecnológico Definido
-
-| Componente | Tecnología | Rol / Responsabilidad |
-| :--- | :--- | :--- |
-| **Frontend & BI** | Python 3.10+ / Streamlit / Plotly | Panel ejecutivo con KPIs en tiempo real, tablas operativas y auto-refresco. |
-| **Backend / Bot** | Node.js (v18+) / `whatsapp-web.js` | Automatización de WhatsApp Multi-Device con persistencia de sesión local (`LocalAuth`). |
-| **Cerebro NLP** | API de Grok (`xAI`) / OpenAI SDK | Procesamiento de lenguaje natural, clasificación y ejecución de *Function Calling*. |
-| **Base de Datos** | Microsoft SQL Server (OLTP: `INBESTIGA_TESIS`) | Almacenamiento relacional con integridad referencial estricta. |
-| **Conectores DB** | `mssql` (Node.js) & `pyodbc` (Python) | Pool de conexiones y ejecución de transacciones atómicas seguras. |
+> **Nota para la Sustentación:**  
+> El Agente IA y el Dashboard de Trazabilidad en vivo se conectan directamente a **`INBESTIGA_TESIS` (OLTP)** para garantizar que cuando el jurado envíe un WhatsApp, el registro aparezca reflejado en el panel en menos de 3 segundos sin tener que esperar a que corra un lote ETL nocturno.
 
 ---
 
-## 🗄️ 3. Estructura de la Base de Datos (Fase BUYER)
+## 📋 4. Tablas Utilizadas por el Bot y Flujo de Datos
 
-El prototipo interactúa exclusivamente con las siguientes **9 tablas del modelo transaccional**:
+El flujo del bot interactúa con **7 tablas clave** del modelo relacional:
 
-1. **`UNIVERSIDAD`**: Catálogo universitario con flag de cobertura `atendida` (1 = Sí, 0 = No).
-2. **`CARRERA`**: Programas académicos vinculados a cada universidad (`atendida BIT`).
-3. **`CONTACTO`**: Identidad del estudiante (nombres, apellidos, número de WhatsApp único, consentimiento).
-4. **`PERFIL_ACADEMICO`**: Información académica del tesista (etapa, ciclo, sede, tipo de investigación).
-5. **`BUYER`**: Estado del prospecto (`ACTIVO` si cuenta con cobertura completa o `SIN_COBERTURA` si pasa a lista de espera).
-6. **`CANAL`**: Canal de origen (por defecto `canal_id = 1`: "WhatsApp organico").
-7. **`CAMPANIA`**: Campaña publicitaria asociada (`NULL` para tráfico orgánico).
-8. **`CONVERSACION`**: Sesión de chat registrada por contacto y canal.
-9. **`MENSAJE`**: Trazabilidad completa de mensajes emitidos tanto por el `CLIENTE` como por el `BOT`.
+```mermaid
+erDiagram
+    UNIVERSIDAD ||--o{ CARRERA : contiene
+    CARRERA ||--o{ PERFIL_ACADEMICO : referencia
+    CONTACTO ||--|| PERFIL_ACADEMICO : tiene
+    CONTACTO ||--|| BUYER : califica_como
+    CONTACTO ||--o{ CONVERSACION : inicia
+    CONVERSACION ||--o{ MENSAJE : registra
+    CANAL ||--o{ CONVERSACION : canaliza
 
-> **Integridad Referencial Garantizada:** La función `registrarBuyerTransaccional` en `bot.js` ejecuta un bloque de transacción SQL Server (`BEGIN TRANSACTION` / `COMMIT` / `ROLLBACK`) para garantizar que nunca se inserte un registro huérfano.
+    UNIVERSIDAD {
+        int universidad_id PK
+        string nombre
+        bit atendida "1 = Con Cobertura, 0 = Sin Cobertura"
+    }
+    CARRERA {
+        int carrera_id PK
+        int universidad_id FK
+        string nombre
+        bit atendida "1 = Con Cobertura, 0 = Sin Cobertura"
+    }
+    CONTACTO {
+        int contacto_id PK
+        string nombres
+        string apellidos
+        string whatsapp "UNIQUE (Número único)"
+        string correo
+    }
+    PERFIL_ACADEMICO {
+        int perfil_academico_id PK
+        int contacto_id FK
+        int carrera_id FK
+        string etapa_academica
+        string ciclo
+        string sede
+    }
+    BUYER {
+        int buyer_id PK
+        int contacto_id FK
+        datetime fecha_buyer
+        string necesidad_inicial
+        string estado "ACTIVO o SIN_COBERTURA"
+    }
+    CONVERSACION {
+        int conversacion_id PK
+        int contacto_id FK
+        datetime fecha_inicio
+        string estado
+    }
+    MENSAJE {
+        int mensaje_id PK
+        int conversacion_id FK
+        string emisor "CLIENTE o BOT"
+        string contenido
+    }
+```
+
+### Flujo de inserción por pasos:
+1. **Paso 1 (Lectura de Cobertura):** Al recibir universidad y carrera, la herramienta `verificar_cobertura` ejecuta un `SELECT` sobre `UNIVERSIDAD` y `CARRERA` verificando si `u.atendida = 1 AND c.atendida = 1`.
+2. **Paso 2 (Transacción Atómica `registrar_buyer`):**
+   - **`CONTACTO`:** Inserta al prospecto con su nombre, apellidos y número de WhatsApp (o actualiza si ya existía).
+   - **`PERFIL_ACADEMICO`:** Asocia el contacto con la carrera identificada.
+   - **`BUYER`:** Registra el prospecto asignándole el estado `ACTIVO` (si tiene cobertura) o `SIN_COBERTURA` (si va a lista de espera).
+   - **`CONVERSACION` & `MENSAJE`:** Registra la sesión y almacena el intercambio exacto de mensajes para fines de auditoría.
 
 ---
 
-## 📂 4. Estructura del Proyecto
+## 🔌 5. ¿Cómo se conecta el Bot a SQL Server?
+
+* **Tecnología en Node.js (`bot.js`):** Driver nativo `mssql` con el motor C++ `msnodesqlv8`.
+* **Modo de Autenticación:** **Windows Authentication (Trusted Connection)**.
+  ```
+  Driver={ODBC Driver 17 for SQL Server};Server=localhost;Database=INBESTIGA_TESIS;Trusted_Connection=yes;TrustServerCertificate=yes;
+  ```
+* **Ventajas de esta conexión:**
+  1. No expone contraseñas en texto plano dentro del código.
+  2. Utiliza conexión por socket nativo de alto rendimiento.
+  3. Ejecuta sentencias preparadas con parámetros tipados (`sql.VarChar`, `sql.Int`), haciendo al sistema **100% inmune a inyección SQL**.
+
+---
+
+## 📊 6. Dashboard de Inteligencia de Negocios (KPIs Mostrados)
+
+El Dashboard en Streamlit (`dashboard.py`) consume las vistas y tablas del OLTP calculando en tiempo real:
+
+| KPI | Nombre del Indicador | Fórmula / Lógica | Impacto en el Negocio |
+| :---: | :--- | :--- | :--- |
+| **B01** | **Tasa de Conversión a Buyer** | $\frac{\text{Total Buyers Registrados}}{\text{Total Contactos en WhatsApp}} \times 100$ | Mide la efectividad del canal WhatsApp para captar prospectos identificados. |
+| **B02** | **Tasa de Cobertura Activa** | $\frac{\text{Buyers con Cobertura (ACTIVOS)}}{\text{Total Buyers}} \times 100$ | Indica qué porcentaje de la demanda recibida puede ser atendida por la oferta actual. |
+| **B06** | **Demanda Fuera de Cobertura** | $\sum \text{Buyers con estado 'SIN\_COBERTURA'}$ | **KPI Clave de Expansión:** Muestra qué universidades y carreras tienen alta demanda pero no tienen asesores asignados. |
+| **B07** | **Resolución Sin Humano (Bot)** | $\frac{\text{Conversaciones cerradas por el Bot}}{\text{Total Conversaciones}} \times 100$ | Cuantifica el ahorro de horas/hombre del equipo humano de admisiones. |
+
+---
+
+## 👥 7. Estructura de Archivos del Repositorio
 
 ```
 Sistema_AgenteBuyers/
-├── 01_CREAR_BD_TRANSACCIONAL_DEFINITIVO.sql   # Script oficial de creación del OLTP
-├── 02_POBLAR_BD_TRANSACCIONAL_DEFINITIVO.sql  # Poblado determinista de prueba
-├── 03_CREAR_DATAMART_DEFINITIVO.sql           # Esquema dimensional (INBESTIGA_MART)
-├── 04_ETL_POBLAR_DATAMART_DEFINITIVO.sql      # Procedimiento ETL de reconciliación
-├── bot.js                                     # Backend del Bot WhatsApp + Grok + SQL Server
-├── dashboard.py                               # Dashboard BI interactivo en Streamlit
-├── database.sql                               # Script auxiliar de validación de datos
-├── diagnostico_sistema.py                     # Script pre-vuelo para chequear conectividad
-├── simulador_chat.js                          # Simulador CLI para pruebas sin teléfono
-├── package.json                               # Dependencias Node.js
-├── requirements.txt                           # Dependencias Python
-├── .env.example                               # Plantilla de variables de configuración
-├── .env                                       # Variables de entorno locales (en .gitignore)
-├── .gitignore                                 # Protección de secretos y sesión de WhatsApp
-└── README.md                                  # Documentación completa del proyecto
+├── scripts/                                       # Scripts SQL oficiales de la solución
+│   ├── 01_CREAR_BD_TRANSACCIONAL_DEFINITIVO.sql  # Creación del modelo OLTP (26 tablas)
+│   ├── 02_POBLAR_BD_TRANSACCIONAL_DEFINITIVO.sql # Datos semilla de prueba
+│   ├── 03_CREAR_DATAMART_DEFINITIVO.sql          # Creación del Data Mart dimensional (18D + 13F)
+│   └── 04_ETL_POBLAR_DATAMART_DEFINITIVO.sql     # Procedimientos de carga analítica
+├── bot.js                                        # Agente WhatsApp en vivo (Node.js + Grok/Gemini)
+├── dashboard.py                                  # Panel de Inteligencia de Negocios (Streamlit)
+├── simulador_chat.py                             # Simulador de chat en Python para pruebas rápidas
+├── simulador_chat.js                             # Simulador de chat en Node.js
+├── diagnostico_sistema.py                        # Script de validación de salud del sistema
+├── .env                                          # Configuración de base de datos y API Keys
+├── package.json                                  # Dependencias Node.js (whatsapp-web.js, mssql, etc.)
+├── requirements.txt                              # Dependencias Python (streamlit, pandas, plotly, pyodbc)
+└── README.md                                     # Este documento maestro de sustanciación
 ```
-
----
-
-## 🚀 5. Guía de Instalación y Configuración
-
-### Prerrequisitos
-* **Node.js** v18 o superior (`node -v`).
-* **Python** 3.10 o superior (`python --version`).
-* **SQL Server** en ejecución con la base de datos `INBESTIGA_TESIS` creada (ejecutando previamente los scripts `01` y `02`).
-* **ODBC Driver 17 for SQL Server** instalado.
-* **API Key de Grok (xAI)** obtenida en [console.x.ai](https://console.x.ai/).
-
-### Paso 1: Configurar Variables de Entorno (`.env`)
-Edita el archivo `.env` en la raíz del proyecto:
-```env
-# Conexión SQL Server
-DB_SERVER=localhost
-DB_PORT=1433
-DB_NAME=INBESTIGA_TESIS
-DB_USER=sa
-DB_PASSWORD=TuPassword123*
-DB_TRUST_SERVER_CERTIFICATE=true
-DB_ODBC_DRIVER=ODBC Driver 17 for SQL Server
-
-# Inteligencia Artificial (xAI Grok)
-XAI_API_KEY=xai-tu-api-key-real-aqui
-XAI_MODEL=grok-2-latest
-```
-
-### Paso 2: Instalar Dependencias
-Abre una terminal de PowerShell:
-
-```powershell
-# 1. Dependencias del Bot de Node.js
-npm install
-
-# 2. Dependencias de Python para el Dashboard
-pip install -r requirements.txt
-```
-
-### Paso 3: Diagnóstico Pre-Vuelo
-Ejecuta el script de diagnóstico para verificar que SQL Server y las 9 tablas estén listos:
-```powershell
-python diagnostico_sistema.py
-```
-
----
-
-## 🎬 6. Ejecución del Prototipo
-
-Para una demostración en vivo, se deben abrir **dos terminales independientes**:
-
-### Terminal 1: Iniciar el Bot de WhatsApp
-```powershell
-npm start
-```
-1. Se generará un código QR en la consola.
-2. Abre WhatsApp en tu celular $\rightarrow$ **Dispositivos vinculados** $\rightarrow$ **Vincular un dispositivo** y escanea el QR.
-3. Tras autenticarse, aparecerá: `🤖 AGENTE BUYER LISTO Y CONECTADO A WHATSAPP REAL`.
-
-### Terminal 2: Iniciar el Dashboard BI
-```powershell
-streamlit run dashboard.py
-```
-* Tu navegador abrirá automáticamente `http://localhost:8501`.
-* Verás los KPIs iniciales y el botón de auto-refresco activado (actualización cada 5 segundos).
-
----
-
-## 🧪 7. Guion de Demostración (Casos de Prueba)
-
-### Caso A: Estudiante con Cobertura (`ACTIVO`)
-1. Envía un mensaje al bot desde otro teléfono:
-   > *"Hola, me llamo David Salazar, estudio Ingeniería de Sistemas en la Universidad Nacional de Trujillo y necesito ayuda urgente con mi proyecto de tesis."*
-2. **Lo que hace el Bot:**
-   * Llama a `verificar_cobertura` con UNT + Sistemas $\rightarrow$ Detecta `atendida = 1`.
-   * Llama a `registrar_buyer` $\rightarrow$ Inserta `CONTACTO`, `PERFIL_ACADEMICO` y `BUYER` con `estado = 'ACTIVO'`.
-   * Responde al estudiante felicitándolo y confirmándole que INBESTIGA cubre su programa y universidad.
-3. **Lo que se ve en el Dashboard:**
-   * El contador **Total Buyers** y **Con Cobertura** se incrementa de inmediato en pantalla sin recargar manualmente.
-   * Aparece en la pestaña **Lista de Buyers** con etiqueta verde `ACTIVO`.
-
-### Caso B: Estudiante sin Cobertura (`SIN_COBERTURA`)
-1. Envía otro mensaje:
-   > *"Hola, soy Andrea Peña de la Universidad de Lima, estudio Diseño Gráfico y quiero saber si asesoran tesis."*
-2. **Lo que hace el Bot:**
-   * Llama a `verificar_cobertura` $\rightarrow$ Detecta `atendida = 0` (o no listada).
-   * Llama a `registrar_buyer` $\rightarrow$ Registra el prospecto con `estado = 'SIN_COBERTURA'`.
-   * Responde cordialmente explicándole que por ahora no se atiende esa carrera, pero que sus datos quedan guardados en lista de espera preferencial.
-3. **Lo que se ve en el Dashboard:**
-   * Se incrementa el KPI **Sin Cobertura (Rojo)** y se actualiza el gráfico de torta de efectividad de catálogo.
-
-### Caso C: Demostración Rápida por Terminal (Simulador CLI)
-Si en plena exposición no se desea usar el celular o la red falla, puedes lanzar una prueba directa:
-```powershell
-node simulador_chat.js "Hola, soy Roberto Gómez de la UPAO de Administracion y necesito asesoría" 988776655
-```
-El script ejecutará el flujo idéntico de Grok y SQL Server, y el registro impactará al Dashboard en el segundo exacto.
-
----
-
-## 🔒 8. Seguridad y Buenas Prácticas
-* Las credenciales y llaves privadas de Grok se gestionan estrictamente mediante variables de entorno (`.env`).
-* Las carpetas criptográficas de sesión de WhatsApp (`.wwebjs_auth/`) están excluidas del control de versiones en [.gitignore](file:///c:/Trabajos%20UNT/CICLO%20VIII/INTELIGENCIA%20DE%20NEGOCIOS/Sistema_AgenteBuyers/.gitignore).
-* Todas las consultas SQL Server utilizan parámetros tipados (`sql.VarChar`, `sql.Int`) previniendo cualquier vulnerabilidad de SQL Injection.
-

@@ -28,34 +28,76 @@ require('dotenv').config();
 
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode               = require('qrcode-terminal');
-const sql                  = require('mssql');
 const OpenAI               = require('openai');
 
 // ==============================================================================
-// 1. CONFIGURACIÓN DE CONEXIONES
+// 1. CONFIGURACIÓN DE CONEXIONES (Autenticación de Windows vs SQL Server)
 // ==============================================================================
 
-/** Configuración del pool de conexión a SQL Server (INBESTIGA_TESIS). */
-const dbConfig = {
-    server  : process.env.DB_SERVER || 'localhost',
-    port    : parseInt(process.env.DB_PORT, 10) || 1433,
-    database: process.env.DB_NAME   || 'INBESTIGA_TESIS',
-    user    : process.env.DB_USER   || 'sa',
-    password: process.env.DB_PASSWORD || '',
-    options : {
-        encrypt                : false,
-        trustServerCertificate : (process.env.DB_TRUST_SERVER_CERTIFICATE || 'true') === 'true',
-        enableArithAbort       : true,
-        connectTimeout         : 15000,
-        requestTimeout         : 30000,
-    },
-    pool: {
-        max              : 10,
-        min              : 0,
-        idleTimeoutMillis: 30000,
-        acquireTimeoutMillis: 30000,
-    },
-};
+const useWindowsAuth = !process.env.DB_USER;
+let sql;
+let dbConfig;
+
+if (useWindowsAuth) {
+    try {
+        sql = require('mssql/msnodesqlv8');
+        const driver = process.env.DB_DRIVER || 'ODBC Driver 17 for SQL Server';
+        const server = (process.env.DB_SERVER || 'localhost').trim();
+        const database = (process.env.DB_NAME || 'INBESTIGA_TESIS').trim();
+        dbConfig = {
+            connectionString: `Driver={${driver}};Server=${server};Database=${database};Trusted_Connection=yes;TrustServerCertificate=yes;`,
+            pool: {
+                max: 10,
+                min: 0,
+                idleTimeoutMillis: 30000
+            }
+        };
+    } catch (err) {
+        sql = require('mssql');
+        dbConfig = {
+            server  : process.env.DB_SERVER || 'localhost',
+            port    : parseInt(process.env.DB_PORT, 10) || 1433,
+            database: process.env.DB_NAME   || 'INBESTIGA_TESIS',
+            user    : process.env.DB_USER   || 'sa',
+            password: process.env.DB_PASSWORD || '',
+            options : {
+                encrypt                : false,
+                trustServerCertificate : true,
+                enableArithAbort       : true,
+                connectTimeout         : 15000,
+                requestTimeout         : 30000,
+            },
+            pool: {
+                max              : 10,
+                min              : 0,
+                idleTimeoutMillis: 30000,
+                acquireTimeoutMillis: 30000,
+            },
+        };
+    }
+} else {
+    sql = require('mssql');
+    dbConfig = {
+        server  : process.env.DB_SERVER || 'localhost',
+        port    : parseInt(process.env.DB_PORT, 10) || 1433,
+        database: process.env.DB_NAME   || 'INBESTIGA_TESIS',
+        user    : process.env.DB_USER   || 'sa',
+        password: process.env.DB_PASSWORD || '',
+        options : {
+            encrypt                : false,
+            trustServerCertificate : true,
+            enableArithAbort       : true,
+            connectTimeout         : 15000,
+            requestTimeout         : 30000,
+        },
+        pool: {
+            max              : 10,
+            min              : 0,
+            idleTimeoutMillis: 30000,
+            acquireTimeoutMillis: 30000,
+        },
+    };
+}
 
 /** Instancia del pool de conexión (singleton). */
 let dbPool = null;
@@ -93,9 +135,9 @@ const AI_BASE_URL = process.env.AI_BASE_URL || (
             : 'https://api.x.ai/v1'
 );
 
-let AI_MODEL = process.env.AI_MODEL;
-if (!AI_MODEL || AI_MODEL === 'grok-2-latest' || AI_MODEL === 'gemini-2.0-flash' || AI_MODEL === 'gemini-1.5-flash') {
-    if (AI_BASE_URL.includes('googleapis.com')) AI_MODEL = 'gemini-3.8-flash';
+let AI_MODEL = process.env.AI_MODEL || process.env.GEMINI_MODEL;
+if (!AI_MODEL || AI_MODEL === 'grok-2-latest' || AI_MODEL === 'gemini-3.8-flash') {
+    if (AI_BASE_URL.includes('googleapis.com')) AI_MODEL = 'gemini-2.5-flash';
     else if (AI_BASE_URL.includes('groq.com')) AI_MODEL = 'llama-3.3-70b-versatile';
     else AI_MODEL = 'grok-2-latest';
 }
@@ -248,7 +290,7 @@ async function registrarBuyerTransaccional(data) {
             await new sql.Request(transaction)
                 .input('contacto_id', sql.Int,       contactoId)
                 .input('nombres',     sql.VarChar(100), data.nombres || 'Estudiante')
-                .input('apellidos',   sql.VarChar(100), data.apellidos || 'Por Asignar')
+                .input('apellidos',   sql.VarChar(100), data.apellidos || null)
                 .input('correo',      sql.VarChar(150), data.correo   || null)
                 .query(`
                     UPDATE CONTACTO
@@ -262,7 +304,7 @@ async function registrarBuyerTransaccional(data) {
             // Nuevo contacto
             const insContacto = await new sql.Request(transaction)
                 .input('nombres',   sql.VarChar(100),  data.nombres   || 'Estudiante WhatsApp')
-                .input('apellidos', sql.VarChar(100),  data.apellidos || 'Por Asignar')
+                .input('apellidos', sql.VarChar(100),  data.apellidos || null)
                 .input('whatsapp',  sql.VarChar(30),   data.whatsapp)
                 .input('correo',    sql.VarChar(150),  data.correo    || null)
                 .query(`
@@ -325,11 +367,12 @@ async function registrarBuyerTransaccional(data) {
             await new sql.Request(transaction)
                 .input('buyer_id',  sql.Int,        buyerId)
                 .input('estado',    sql.VarChar(30), estadoBuyer)
-                .input('necesidad', sql.VarChar(150),data.necesidad_inicial || 'Asesoría de Tesis')
+                .input('necesidad', sql.VarChar(150), (data.necesidad_inicial || 'Asesoría de Tesis').substring(0, 150))
                 .query(`
                     UPDATE BUYER
                     SET  estado            = @estado,
-                         necesidad_inicial = @necesidad
+                         necesidad_inicial = @necesidad,
+                         fecha_buyer       = SYSDATETIME()
                     WHERE buyer_id = @buyer_id
                 `);
             console.log(`   ♻️  BUYER actualizado: ID ${buyerId} → ${estadoBuyer}`);
@@ -338,7 +381,7 @@ async function registrarBuyerTransaccional(data) {
                 .input('contacto_id',       sql.Int,        contactoId)
                 .input('canal_captacion_id', sql.Int,       1)   // WhatsApp orgánico
                 .input('servicio_interes_id',sql.Int,       2)   // Proyecto de Tesis
-                .input('necesidad_inicial',  sql.VarChar(150), data.necesidad_inicial || 'Asesoría Integral de Tesis')
+                .input('necesidad_inicial',  sql.VarChar(150), (data.necesidad_inicial || 'Asesoría Integral de Tesis').substring(0, 150))
                 .input('estado',             sql.VarChar(30),  estadoBuyer)
                 .query(`
                     INSERT INTO BUYER (
@@ -565,41 +608,33 @@ const GROK_TOOLS = [
 // ==============================================================================
 
 const SYSTEM_PROMPT = `
-Eres "Vicky", la Asistente Virtual de Admisión de INBESTIGA, una startup especializada en asesoría de tesis en Perú.
-Tu misión es interactuar de forma cálida, empática y profesional con estudiantes que escriben por WhatsApp para validar si su universidad y carrera tienen cobertura de asesoría y registrarlos en nuestro sistema.
+Eres "Vicky", la Asistente Virtual de Admisión de INBESTIGA, institución especializada en asesoría y acompañamiento integral de tesis universitarias en Perú.
+Tu personalidad es 100% humana, cálida, empática, profesional y resolutiva. Jamás debes sonar como un robot ni revelar aspectos técnicos de la plataforma.
 
-══════════════════════════════════════════════
-FLUJO DE CONVERSACIÓN OBLIGATORIO (en orden):
-══════════════════════════════════════════════
-Paso 1 — SALUDO:
-  Saluda cordialmente, preséntate como "Vicky de INBESTIGA" y pregunta en qué universidad estudia y qué carrera.
+══════════════════════════════════════════════════════════════
+REGLAS DE ORO DE COMUNICACIÓN (EXPERIENCIA DE USUARIO - UX):
+══════════════════════════════════════════════════════════════
+1. 🚫 PROHIBICIÓN TOTAL DE JERGA TÉCNICA E INTERNA:
+   NUNCA menciones términos técnicos internos al estudiante (como "KPI", "KPI B06", "KPI B01", "Data Mart", "Fase Buyer", "BUYER ACTIVO", "Sin Cobertura", "Base de datos", "SQL", "Backend", etc.). Para el estudiante, eres una asesora académica humana y cercana que lo atiende por WhatsApp.
 
-Paso 2 — VERIFICAR COBERTURA:
-  En cuanto el estudiante mencione su universidad Y carrera, invoca INMEDIATAMENTE la herramienta "verificar_cobertura".
-  No esperes más datos. La herramienta se encarga de consultar la base de datos.
+2. 💬 FLUJO CONVERSACIONAL Y HERRAMIENTAS:
+   - Saludo: Preséntate amablemente como "Vicky de INBESTIGA".
+   - Identificación: Solicita cordialmente el nombre del estudiante, su universidad y su carrera. Si el estudiante ya los proporcionó en su mensaje inicial, no los vuelvas a pedir.
+   - Herramientas internas: En cuanto conozcas universidad y carrera, ejecuta "verificar_cobertura". Luego, con los datos recopilados, ejecuta "registrar_buyer".
 
-Paso 3 — RECOPILAR NOMBRE (si hay cobertura):
-  Si la herramienta devuelve cobertura = true, pide amablemente el nombre completo del estudiante.
-  Si la herramienta devuelve cobertura = false, informa que sus datos quedarán en lista de espera y pide su nombre de todas formas para registrarlo.
+3. 📋 PLANTILLAS EXACTAS DE RESPUESTA FINAL (OBLIGATORIAS):
+   Una vez ejecutada la herramienta "registrar_buyer", tu respuesta final al usuario DEBE emplear EXACTAMENTE una de las siguientes dos plantillas, adaptando dinámicamente los campos entre corchetes según corresponda:
 
-Paso 4 — REGISTRAR EN SISTEMA:
-  Cuando tengas: nombre + resultado de cobertura, invoca "registrar_buyer" con todos los datos recopilados.
-  El campo "whatsapp" se asignará automáticamente con el número del remitente; NO lo pidas al estudiante.
+   ✅ CUANDO LA HERRAMIENTA verificar_cobertura RETORNE QUE SÍ HAY COBERTURA:
+   "¡Hola [Nombre]! 🎉 Qué gusto saludarte, soy Vicky de INBESTIGA. Te confirmo que SÍ contamos con cobertura activa para tu carrera de [Carrera] en [Universidad]. Tus datos han quedado registrados exitosamente. En breve, un especialista te contactará para coordinar tu diagnóstico gratuito. 😊"
 
-Paso 5 — CONFIRMACIÓN FINAL:
-  - Con cobertura (ACTIVO): "¡Excelente, [nombre]! 🎉 INBESTIGA atiende tu carrera en [universidad]. Nuestro equipo de especialistas te ayudará a culminar tu tesis con éxito. En breve te contactaremos para coordinar tu diagnóstico gratuito."
-  - Sin cobertura (SIN_COBERTURA): "Lamentamos que por ahora no tengamos cobertura activa para tu carrera, [nombre]. Tus datos han quedado registrados en nuestra lista de espera preferencial. Cuando ampliemos cobertura, serás de los primeros en ser notificado. 🙏"
+   ⚠️ CUANDO LA HERRAMIENTA verificar_cobertura RETORNE QUE NO HAY COBERTURA:
+   "Hola [Nombre], soy Vicky de INBESTIGA. Lamentamos informarte que, por el momento, no contamos con cobertura activa para tu carrera en esa universidad. No obstante, hemos registrado tus datos en nuestra lista de espera preferencial. Apenas aperturemos nuevas vacantes, te notificaremos de inmediato. ¡Muchas gracias por tu interés! 🙏"
 
-══════════════════════════════════════════════
-REGLAS ESTRICTAS DE INBESTIGA:
-══════════════════════════════════════════════
-❌ NUNCA inventes precios, tarifas ni plazos. Si te preguntan, di: "Nuestro equipo te informará los detalles en la reunión de diagnóstico gratuita."
-❌ NUNCA menciones tecnología (SQL, bots, APIs). Eres simplemente "Vicky".
-❌ NUNCA hagas más de 2 preguntas en un mismo mensaje.
-✅ Mantén respuestas breves (máximo 4 líneas por mensaje en WhatsApp).
-✅ Usa emojis de forma moderada y profesional.
-✅ Si el estudiante ya dio su nombre antes, no lo vuelvas a pedir.
-✅ Si el estudiante pregunta algo fuera del tema de tesis, redirige amablemente: "Estoy aquí para ayudarte con todo lo relacionado a tu tesis 😊 ¿En qué universidad y carrera estudias?"
+4. ✨ REGLAS DE ESTILO Y TONO:
+   - Mantén el uso de emojis exactamente tal cual está en las plantillas (🎉, 😊, 🙏).
+   - NUNCA inventes precios ni tarifas. Si te preguntan por costos, di: "Ese detalle lo coordinará contigo el especialista durante tu sesión de diagnóstico gratuita 😊".
+   - Mantén un tono empático, profesional y natural en todo momento.
 `.trim();
 
 // ==============================================================================
@@ -754,9 +789,9 @@ async function procesarMensajeFallbackHeuristico(userPhone, userMessage) {
 
     // 3. Respuesta de Vicky
     if (cov.cobertura) {
-        return `¡Hola ${nom}! 🎉 Qué gusto saludarte, soy Vicky de INBESTIGA. Te confirmo que SÍ contamos con cobertura activa para tu carrera de ${cov.carrera_nombre || car} en ${cov.universidad_nombre || uni}. Tus datos han quedado registrados exitosamente como BUYER ACTIVO. En breve te contactaremos para coordinar tu diagnóstico gratuito. 😊`;
+        return `¡Hola ${nom}! 🎉 Qué gusto saludarte, soy Vicky de INBESTIGA. Te confirmo que SÍ contamos con cobertura activa para tu carrera de ${cov.carrera_nombre || car} en ${cov.universidad_nombre || uni}. Tus datos han quedado registrados exitosamente. En breve, un especialista te contactará para coordinar tu diagnóstico gratuito. 😊`;
     } else {
-        return `Hola ${nom}, soy Vicky de INBESTIGA. Lamentamos informarte que por el momento no contamos con cobertura activa para tu carrera en esa universidad. No obstante, hemos registrado tus datos en nuestra lista de espera preferencial (Demanda Fuera de Cobertura - KPI B06). Apenas aperturemos nuevas vacantes te notificaremos. ¡Gracias por tu interés! 🙏`;
+        return `Hola ${nom}, soy Vicky de INBESTIGA. Lamentamos informarte que, por el momento, no contamos con cobertura activa para tu carrera en esa universidad. No obstante, hemos registrado tus datos en nuestra lista de espera preferencial. Apenas aperturemos nuevas vacantes, te notificaremos de inmediato. ¡Muchas gracias por tu interés! 🙏`;
     }
 }
 
@@ -783,7 +818,6 @@ const client = new Client({
             '--no-first-run',
             '--no-zygote',
             '--disable-gpu',
-            '--single-process',
         ],
     },
 });

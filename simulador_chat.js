@@ -18,23 +18,53 @@
 'use strict';
 require('dotenv').config();
 
-const sql     = require('mssql');
 const OpenAI  = require('openai');
 const readline = require('readline');
 
-// ── Configuración DB ──────────────────────────────────────────────────────────
-const dbConfig = {
-    server  : process.env.DB_SERVER   || 'localhost',
-    port    : parseInt(process.env.DB_PORT, 10) || 1433,
-    database: process.env.DB_NAME     || 'INBESTIGA_TESIS',
-    user    : process.env.DB_USER     || 'sa',
-    password: process.env.DB_PASSWORD || '',
-    options : {
-        encrypt               : false,
-        trustServerCertificate: (process.env.DB_TRUST_SERVER_CERTIFICATE || 'true') === 'true',
-        enableArithAbort      : true,
-    },
-};
+// ── Configuración DB (Autenticación de Windows vs SQL Server) ────────────────
+const useWindowsAuth = !process.env.DB_USER;
+let sql;
+let dbConfig;
+
+if (useWindowsAuth) {
+    try {
+        sql = require('mssql/msnodesqlv8');
+        const driver = process.env.DB_DRIVER || 'ODBC Driver 17 for SQL Server';
+        const server = (process.env.DB_SERVER || 'localhost').trim();
+        const database = (process.env.DB_NAME || 'INBESTIGA_TESIS').trim();
+        dbConfig = {
+            connectionString: `Driver={${driver}};Server=${server};Database=${database};Trusted_Connection=yes;TrustServerCertificate=yes;`
+        };
+    } catch (err) {
+        sql = require('mssql');
+        dbConfig = {
+            server  : process.env.DB_SERVER   || 'localhost',
+            port    : parseInt(process.env.DB_PORT, 10) || 1433,
+            database: process.env.DB_NAME     || 'INBESTIGA_TESIS',
+            user    : process.env.DB_USER     || 'sa',
+            password: process.env.DB_PASSWORD || '',
+            options : {
+                encrypt               : false,
+                trustServerCertificate: true,
+                enableArithAbort      : true,
+            },
+        };
+    }
+} else {
+    sql = require('mssql');
+    dbConfig = {
+        server  : process.env.DB_SERVER   || 'localhost',
+        port    : parseInt(process.env.DB_PORT, 10) || 1433,
+        database: process.env.DB_NAME     || 'INBESTIGA_TESIS',
+        user    : process.env.DB_USER     || 'sa',
+        password: process.env.DB_PASSWORD || '',
+        options : {
+            encrypt               : false,
+            trustServerCertificate: true,
+            enableArithAbort      : true,
+        },
+    };
+}
 
 // ── Configuración dinámica del cliente IA (Gemini, Groq, Grok, OpenAI) ────────
 const AI_API_KEY = process.env.AI_API_KEY || process.env.GEMINI_API_KEY || process.env.GROQ_API_KEY || process.env.XAI_API_KEY || 'dummy-key';
@@ -49,9 +79,9 @@ const AI_BASE_URL = process.env.AI_BASE_URL || (
             : 'https://api.x.ai/v1'
 );
 
-let AI_MODEL = process.env.AI_MODEL;
-if (!AI_MODEL || AI_MODEL === 'grok-2-latest' || AI_MODEL === 'gemini-2.0-flash' || AI_MODEL === 'gemini-1.5-flash') {
-    if (AI_BASE_URL.includes('googleapis.com')) AI_MODEL = 'gemini-3.8-flash';
+let AI_MODEL = process.env.AI_MODEL || process.env.GEMINI_MODEL;
+if (!AI_MODEL || AI_MODEL === 'grok-2-latest' || AI_MODEL === 'gemini-3.8-flash') {
+    if (AI_BASE_URL.includes('googleapis.com')) AI_MODEL = 'gemini-2.5-flash';
     else if (AI_BASE_URL.includes('groq.com')) AI_MODEL = 'llama-3.3-70b-versatile';
     else AI_MODEL = 'grok-2-latest';
 }
