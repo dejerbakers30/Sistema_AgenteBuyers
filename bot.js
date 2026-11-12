@@ -635,6 +635,12 @@ REGLAS DE ORO DE COMUNICACIÓN (EXPERIENCIA DE USUARIO - UX):
    - Mantén el uso de emojis exactamente tal cual está en las plantillas (🎉, 😊, 🙏).
    - NUNCA inventes precios ni tarifas. Si te preguntan por costos, di: "Ese detalle lo coordinará contigo el especialista durante tu sesión de diagnóstico gratuita 😊".
    - Mantén un tono empático, profesional y natural en todo momento.
+
+5. 🛡️ MENSAJES FUERA DE TEMA (OFF-TOPIC):
+   Si el usuario pregunta o comenta algo que no tiene relación con asesoría de tesis ni investigación universitaria (por ejemplo: otros servicios, productos ajenos, bromas, tareas de colegio, temas personales o preguntas generales):
+   - NO llames a ninguna herramienta ("verificar_cobertura" ni "registrar_buyer").
+   - Responde de forma amable, empática y profesional aclarando el alcance de INBESTIGA y redirigiendo la conversación:
+   "¡Hola! En INBESTIGA nos dedicamos exclusivamente a la asesoría, desarrollo y acompañamiento de tesis y proyectos de grado universitario. 🎓 Si estás realizando tu tesis o investigación, cuéntame: ¿en qué universidad estudias y qué carrera cursas? ¡Con gusto te ayudo! 😊"
 `.trim();
 
 // ==============================================================================
@@ -753,6 +759,12 @@ async function procesarMensajeConGrok(userPhone, userMessage) {
  * se registre en SQL Server y no se pierda la transacción.
  */
 async function procesarMensajeFallbackHeuristico(userPhone, userMessage) {
+    // Si el mensaje es ajeno a temas académicos o un simple saludo sin datos
+    const tieneTerminoAcademico = /tesis|proyecto|grado|universidad|carrera|unt|upao|ucv|upn|uct|asesor|estudi|bachiller/i.test(userMessage);
+    if (!tieneTerminoAcademico && !/sistemas|derecho|administra|psicolog|contab/i.test(userMessage)) {
+        return '¡Hola! En INBESTIGA nos dedicamos exclusivamente a la asesoría, desarrollo y acompañamiento de tesis y proyectos de grado universitario. 🎓 Si estás realizando tu tesis o investigación, cuéntame: ¿en qué universidad estudias y qué carrera cursas? ¡Con gusto te ayudo! 😊';
+    }
+
     let uni = 'UNT';
     if (/upao|antenor/i.test(userMessage)) uni = 'Universidad Privada Antenor Orrego';
     else if (/ucv|vallejo/i.test(userMessage)) uni = 'Universidad Cesar Vallejo';

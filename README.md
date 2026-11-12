@@ -187,7 +187,30 @@ El Dashboard en Streamlit (`dashboard.py`) consume las vistas y tablas del OLTP 
 
 ---
 
-## 👥 7. Estructura de Archivos del Repositorio
+## 🎬 7. Guía de Ejecución Rápida y Casos de Prueba en Vivo
+
+### Paso 1: Levantar el Bot de WhatsApp (Terminal 1)
+```powershell
+cd "c:\Trabajos UNT\CICLO VIII\INTELIGENCIA DE NEGOCIOS\Sistema_AgenteBuyers"
+npm start
+```
+*Inicia mostrando:* `🤖 "VICKY" LISTA Y CONECTADA A WHATSAPP EN VIVO`.
+
+### Paso 2: Levantar el Dashboard BI (Terminal 2)
+```powershell
+cd "c:\Trabajos UNT\CICLO VIII\INTELIGENCIA DE NEGOCIOS\Sistema_AgenteBuyers"
+streamlit run dashboard.py
+```
+*Abre automáticamente en el navegador:* `http://localhost:8501`.
+
+### Casos de Demostración:
+* **Caso 1 (Con Cobertura - ACTIVO):** *"Hola, soy Carlos Mendoza de la UNT de Ingenieria de Sistemas y busco asesoría para mi tesis"* $\rightarrow$ Vicky confirma con la plantilla festiva 🎉, registra en SQL Server y aparece badge verde en el Dashboard.
+* **Caso 2 (Sin Cobertura - Lista de Espera):** *"Buenas tardes, soy Andrea Castro de la Universidad de Lima, estudio Diseño Gráfico y busco asesoría"* $\rightarrow$ Vicky informa con la plantilla cordial 🙏 que quedó en lista de espera (alimenta KPI B06).
+* **Caso 3 (Mensaje Fuera de Tema / Off-Topic):** *"Hola Vicky, ¿vendes hamburguesas o pizzas?"* $\rightarrow$ Vicky no ejecuta herramientas y redirige con calidez a la asesoría de tesis 🎓.
+
+---
+
+## 👥 9. Estructura de Archivos del Repositorio
 
 ```
 Sistema_AgenteBuyers/
