@@ -1,4 +1,4 @@
-# 🎓 INBESTIGA - Sistema Agente IA de Captación (Fase BUYER) & Dashboard BI
+# INBESTIGA - Sistema Agente IA de Captación (Fase BUYER) & Dashboard BI
 ### Universidad Nacional de Trujillo · Escuela de Ingeniería de Sistemas
 **Curso:** Inteligencia de Negocios · **Ciclo:** VIII · **Caso de Negocio:** INBESTIGA (Asesoría de Tesis Universitaria)
 
