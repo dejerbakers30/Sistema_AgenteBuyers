@@ -4,7 +4,8 @@
   "description": "Agente IA WhatsApp con Grok (xAI) para la Fase BUYER - INBESTIGA",
   "main": "bot.js",
   "scripts": {
-    "start": "node bot.js"
+    "start": "node bot.js",
+    "dashboard": "node server_dashboard.js"
   },
   "keywords": [
     "whatsapp",
@@ -17,7 +18,9 @@
   "author": "INBESTIGA",
   "license": "ISC",
   "dependencies": {
+    "cors": "^2.8.6",
     "dotenv": "^16.6.1",
+    "express": "^5.3.0",
     "msnodesqlv8": "^4.5.0",
     "mssql": "^11.0.2",
     "openai": "^4.104.0",
