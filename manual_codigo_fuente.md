@@ -6,241 +6,265 @@
 
 ### A. CANAL CONVERSACIONAL WHATSAPP (PROSPECTO - SIN LOGIN)
 
-#### 1. Recepción de mensajes y bienvenida con el agente "Vicky"
+#### 1. Recepción de mensajes y registro en SQL Server
 
 **ACÁ COLOCAR IMAGEN del archivo bot.js**  
-*(client.on('message') / asegurarConversacion())*
+*(asegurarConversacion() (líneas 432–488))*
 
 ```javascript
-// bot.js - Captura de mensajes entrantes y bienvenida del agente Vicky
-client.on('message', async (msg) => {
-    try {
-        // Ignorar mensajes grupales o de estado de WhatsApp
-        if (msg.from.includes('@g.us') || msg.from === 'status@broadcast') return;
-
-        const rawPhone = msg.from.replace('@c.us', '').trim();
-        const userMessage = (msg.body || '').trim();
-        if (!userMessage) return;
-
-        console.log(`[WHATSAPP IN] De: ${rawPhone} | Mensaje: "${userMessage}"`);
-
-        // 1. Asegurar la conversación y el contacto en SQL Server
-        const convData = await asegurarConversacion(rawPhone);
-        const conversacionId = convData.conversacionId;
-
-        // 2. Registrar el mensaje entrante en la tabla MENSAJE
-        await registrarMensajeEnBD(conversacionId, 'PROSPECTO', userMessage);
-
-        // 3. Procesar intención del estudiante mediante el agente Vicky
-        const respuestaAgente = await procesarMensajeConGrok(rawPhone, userMessage);
-
-        // 4. Enviar la respuesta generada al estudiante por WhatsApp
-        if (respuestaAgente && respuestaAgente.trim()) {
-            await client.sendMessage(msg.from, respuestaAgente);
-            await registrarMensajeEnBD(conversacionId, 'AGENTE_VICKY', respuestaAgente);
-            console.log(`[WHATSAPP OUT] Respuesta enviada a ${rawPhone}`);
-        }
-    } catch (err) {
-        console.error(`[ERROR BOT] Fallo al procesar mensaje de ${msg.from}:`, err.message);
-    }
-});
-
 async function asegurarConversacion(whatsappNumber) {
-    const pool = await getDbPool();
-    const cleanPhone = String(whatsappNumber).replace(/\D/g, '');
+    try {
+        const pool = await getDbPool();
 
-    // Buscar contacto existente o registrar nuevo prospecto
-    let contactoRes = await pool.request()
-        .input('telefono', sql.VarChar(50), cleanPhone)
-        .query('SELECT id_contacto, nombre_completo FROM CONTACTO WHERE telefono = @telefono');
+        // Buscar o crear CONTACTO temporal
+        let ctRes = await pool.request()
+            .input('wa', sql.VarChar(30), whatsappNumber)
+            .query(`SELECT contacto_id FROM CONTACTO WHERE whatsapp = @wa`);
 
-    let contactoId;
-    if (contactoRes.recordset.length === 0) {
-        let insertRes = await pool.request()
-            .input('telefono', sql.VarChar(50), cleanPhone)
-            .input('nombre', sql.VarChar(150), `Prospecto ${cleanPhone.slice(-4)}`)
-            .query(`INSERT INTO CONTACTO (nombre_completo, telefono, canal_origen, fecha_registro, estado_interaccion)
-                    OUTPUT INSERTED.id_contacto
-                    VALUES (@nombre, @telefono, 'WHATSAPP', GETDATE(), 'INICIADO')`);
-        contactoId = insertRes.recordset[0].id_contacto;
-    } else {
-        contactoId = contactoRes.recordset[0].id_contacto;
-    }
+        let contactoId;
+        if (ctRes.recordset.length > 0) {
+            contactoId = ctRes.recordset[0].contacto_id;
+        } else {
+            const insRes = await pool.request()
+                .input('wa', sql.VarChar(30), whatsappNumber)
+                .query(`
+                    INSERT INTO CONTACTO (
+                        nombres, whatsapp,
+                        consentimiento_contacto, fecha_registro, estado
+                    ) VALUES (
+                        'Estudiante WhatsApp', @wa,
+                        1, SYSDATETIME(), 'ACTIVO'
+                    );
+                    SELECT SCOPE_IDENTITY() AS contacto_id;
+                `);
+            contactoId = insRes.recordset[0].contacto_id;
+        }
 
-    // Obtener o inicializar conversacion activa en SQL Server
-    let convRes = await pool.request()
-        .input('id_contacto', sql.Int, contactoId)
-        .query("SELECT TOP 1 id_conversacion FROM CONVERSACION WHERE id_contacto = @id_contacto AND estado = 'ABIERTA'");
+        // Buscar conversación EN_CURSO o crear una nueva
+        const convRes = await pool.request()
+            .input('cid', sql.Int, contactoId)
+            .query(`
+                SELECT TOP 1 conversacion_id
+                FROM CONVERSACION
+                WHERE contacto_id = @cid AND estado = 'EN_CURSO'
+                ORDER BY conversacion_id DESC
+            `);
 
-    if (convRes.recordset.length === 0) {
-        let newConv = await pool.request()
-            .input('id_contacto', sql.Int, contactoId)
-            .query(`INSERT INTO CONVERSACION (id_contacto, fecha_inicio, estado, agente_asignado)
-                    OUTPUT INSERTED.id_conversacion
-                    VALUES (@id_contacto, GETDATE(), 'ABIERTA', 'Vicky')`);
-        return { contactoId, conversacionId: newConv.recordset[0].id_conversacion };
-    }
-    return { contactoId, conversacionId: convRes.recordset[0].id_conversacion };
-}
+        if (convRes.recordset.length > 0) {
+            return { contactoId, conversacionId: convRes.recordset[0].conversacion_id };
+        }
+
+        const newConv = await pool.request()
+            .input('cid', sql.Int, contactoId)
+            .query(`
+                INSERT INTO CONVERSACION (
+                    contacto_id, canal_id, campania_id,
+                    fecha_inicio, resuelta_sin_humano, estado
+                ) VALUES (
+                    @cid, 1, NULL,
+                    SYSDATETIME(), 1, 'EN_CURSO'
+                );
+                SELECT SCOPE_IDENTITY() AS conversacion_id;
+            `);
+
+        return { contactoId, conversacionId: newConv.recordset[0].conversacion_id };
 ```
 
-Descripción: se muestra el código para procesar los mensajes entrantes de WhatsApp en tiempo real, registrando automáticamente al estudiante en las tablas CONTACTO y CONVERSACION de SQL Server y activando la bienvenida del agente Vicky sin requerir autenticación.
+Descripción: se muestra el código para asegurar la conversación y el contacto en SQL Server, consultando mediante @wa en la tabla CONTACTO e inicializando un registro en CONVERSACION en estado EN_CURSO si no existe.
 
 ---
 
-#### 2. Extracción y verificación de cobertura de universidad y carrera
+#### 2. Verificación de reglas de cobertura académica
 
 **ACÁ COLOCAR IMAGEN del archivo bot.js**  
-*(verificarCobertura())*
+*(verificarCobertura() (líneas 173–238))*
 
 ```javascript
-// bot.js - Verificación de reglas de cobertura académica en SQL Server
 async function verificarCobertura({ universidad, carrera }) {
+    console.log(`\n🔍 [verificar_cobertura] "${universidad}" | "${carrera}"`);
     try {
-        const pool = await getDbPool();
-        console.log(`[COBERTURA] Evaluando: Universidad='${universidad}' | Carrera='${carrera}'`);
+        const pool    = await getDbPool();
+        const uFiltro = `%${universidad.trim()}%`;
+        const cFiltro = `%${carrera.trim()}%`;
 
-        const uniNorm = (universidad || '').trim();
-        const carNorm = (carrera || '').trim();
-
-        // Consulta de validación cruzada sobre las tablas UNIVERSIDAD y CARRERA
-        const result = await pool.request()
-            .input('uni', sql.NVarChar(150), `%${uniNorm}%`)
-            .input('car', sql.NVarChar(150), `%${carNorm}%`)
+        // ── Fase 1: JOIN directo ──────────────────────────────────────────────
+        const joinResult = await pool.request()
+            .input('uFiltro', sql.VarChar(150), uFiltro)
+            .input('cFiltro', sql.VarChar(150), cFiltro)
             .query(`
-                SELECT 
-                    u.id_universidad,
-                    u.nombre AS universidad_oficial,
-                    u.tiene_cobertura AS uni_cobertura,
-                    c.id_carrera,
-                    c.nombre AS carrera_oficial,
-                    c.tiene_cobertura AS car_cobertura
+                SELECT TOP 1
+                    u.universidad_id,
+                    u.nombre     AS universidad_nombre,
+                    u.atendida   AS universidad_atendida,
+                    c.carrera_id,
+                    c.nombre     AS carrera_nombre,
+                    c.atendida   AS carrera_atendida
                 FROM UNIVERSIDAD u
-                CROSS JOIN CARRERA c
-                WHERE (u.nombre LIKE @uni OR u.siglas LIKE @uni)
-                  AND (c.nombre LIKE @car OR c.area_conocimiento LIKE @car)
+                INNER JOIN CARRERA c ON c.universidad_id = u.universidad_id
+                WHERE u.nombre LIKE @uFiltro
+                  AND c.nombre LIKE @cFiltro;
             `);
 
-        if (result.recordset.length === 0) {
-            // Intentar búsqueda independiente de universidad
-            const checkUni = await pool.request()
-                .input('uni', sql.NVarChar(150), `%${uniNorm}%`)
-                .query('SELECT TOP 1 id_universidad, nombre, tiene_cobertura FROM UNIVERSIDAD WHERE nombre LIKE @uni OR siglas LIKE @uni');
-
-            const tieneUni = checkUni.recordset.length > 0 && checkUni.recordset[0].tiene_cobertura;
+        if (joinResult.recordset.length > 0) {
+            const row       = joinResult.recordset[0];
+            const cobertura = !!(row.universidad_atendida) && !!(row.carrera_atendida);
+            console.log(`   → JOIN directo: ${cobertura ? '✅ ACTIVA' : '⚠️ SIN COBERTURA'} (${row.universidad_nombre} - ${row.carrera_nombre})`);
             return {
-                tieneCobertura: false,
-                motivo: tieneUni ? 'Carrera no cubierta en sede institucional' : 'Universidad fuera de cobertura geográfica',
-                universidadId: checkUni.recordset[0]?.id_universidad || null,
-                carreraId: null
+                encontrado         : true,
+                universidad_id     : row.universidad_id,
+                universidad_nombre : row.universidad_nombre,
+                carrera_id         : row.carrera_id,
+                carrera_nombre     : row.carrera_nombre,
+                cobertura,
+                mensaje: cobertura
+                    ? `Cobertura activa para ${row.carrera_nombre} en ${row.universidad_nombre}.`
+                    : `La carrera o universidad no está atendida actualmente.`,
             };
         }
 
-        const match = result.recordset[0];
-        const tieneCoberturaTotal = Boolean(match.uni_cobertura && match.car_cobertura);
+        // ── Fase 2: búsquedas independientes ─────────────────────────────────
+        const [uRes, cRes] = await Promise.all([
+            pool.request()
+                .input('uFiltro', sql.VarChar(150), uFiltro)
+                .query(`SELECT TOP 1 universidad_id, nombre, atendida FROM UNIVERSIDAD WHERE nombre LIKE @uFiltro`),
+            pool.request()
+                .input('cFiltro', sql.VarChar(150), cFiltro)
+                .query(`SELECT TOP 1 carrera_id, universidad_id, nombre, atendida FROM CARRERA WHERE nombre LIKE @cFiltro`),
+        ]);
 
-        return {
-            tieneCobertura: tieneCoberturaTotal,
-            motivo: tieneCoberturaTotal 
-                ? 'Cobertura total aprobada por catálogo institucional' 
-                : 'Programa académico sin vacante metodológica activa',
-            universidadId: match.id_universidad,
-            carreraId: match.id_carrera,
-            nombreOficialUni: match.universidad_oficial,
-            nombreOficialCar: match.carrera_oficial
-        };
-    } catch (err) {
-        console.error('[ERROR COBERTURA] Fallo en consulta a SQL Server:', err.message);
-        return { tieneCobertura: false, motivo: 'Error en consulta de reglas de cobertura', error: err.message };
-    }
-}
+        const uFound = uRes.recordset[0] || null;
+        const cFound = cRes.recordset[0] || null;
+
+        if (uFound && cFound) {
+            const cobertura = !!(uFound.atendida) && !!(cFound.atendida);
+            console.log(`   → Búsqueda independiente: ${cobertura ? '✅ ACTIVA' : '⚠️ SIN COBERTURA'}`);
+            return {
+                encontrado         : true,
+                universidad_id     : uFound.universidad_id,
+                universidad_nombre : uFound.nombre,
+                carrera_id         : cFound.carrera_id,
+                carrera_nombre     : cFound.nombre,
+                cobertura,
+                mensaje: cobertura
 ```
 
-Descripción: se muestra el código para validar los datos académicos ingresados por el prospecto frente al catálogo de universidades y carreras en SQL Server, determinando si el estudiante cumple con los criterios de cobertura metodológica institucional.
+Descripción: se muestra el código para validar la universidad y carrera frente a las tablas UNIVERSIDAD y CARRERA en SQL Server, comprobando el campo relacional atendida para determinar si existe cobertura activa.
 
 ---
 
 #### 3. Registro transaccional del prospecto clasificado (tabla BUYER)
 
 **ACÁ COLOCAR IMAGEN del archivo bot.js**  
-*(registrarBuyerTransaccional())*
+*(registrarBuyerTransaccional() (líneas 272–405))*
 
 ```javascript
-// bot.js - Clasificación y registro transaccional en PERFIL_ACADEMICO y BUYER
 async function registrarBuyerTransaccional(data) {
-    const pool = await getDbPool();
+    console.log(`\n📝 [registrar_buyer] Iniciando transacción para: ${data.nombres} (${data.whatsapp})`);
+    const pool        = await getDbPool();
     const transaction = new sql.Transaction(pool);
 
     try {
         await transaction.begin();
 
-        const {
-            contactoId,
-            universidadId,
-            carreraId,
-            universidadDeclarada,
-            carreraDeclarada,
-            gradoAcademico = 'PREGRADO',
-            faseTesis = 'PLAN_DE_TESIS',
-            tieneCobertura,
-            motivoClasificacion
-        } = data;
+        // ── 1. CONTACTO ───────────────────────────────────────────────────────
+        const checkContacto = await new sql.Request(transaction)
+            .input('whatsapp', sql.VarChar(30), data.whatsapp)
+            .query(`SELECT contacto_id FROM CONTACTO WHERE whatsapp = @whatsapp`);
 
-        // 1. Upsert en PERFIL_ACADEMICO mediante MERGE en SQL Server
-        await transaction.request()
-            .input('id_contacto', sql.Int, contactoId)
-            .input('id_universidad', sql.Int, universidadId)
-            .input('id_carrera', sql.Int, carreraId)
-            .input('uni_dec', sql.VarChar(150), universidadDeclarada)
-            .input('car_dec', sql.VarChar(150), carreraDeclarada)
-            .input('grado', sql.VarChar(50), gradoAcademico)
-            .input('fase', sql.VarChar(50), faseTesis)
-            .query(`
-                MERGE INTO PERFIL_ACADEMICO AS target
-                USING (SELECT @id_contacto AS id_contacto) AS source
-                ON (target.id_contacto = source.id_contacto)
-                WHEN MATCHED THEN
-                    UPDATE SET id_universidad = @id_universidad, id_carrera = @id_carrera,
-                               universidad_declarada = @uni_dec, carrera_declarada = @car_dec,
-                               grado_academico = @grado, fase_tesis = @fase, fecha_actualizacion = GETDATE()
-                WHEN NOT MATCHED THEN
-                    INSERT (id_contacto, id_universidad, id_carrera, universidad_declarada, carrera_declarada, grado_academico, fase_tesis, fecha_actualizacion)
-                    VALUES (@id_contacto, @id_universidad, @id_carrera, @uni_dec, @car_dec, @grado, @fase, GETDATE());
-            `);
+        let contactoId;
 
-        // 2. Determinar estado y score de prioridad
-        const estadoBuyer = tieneCobertura ? 'ACTIVO' : 'SIN_COBERTURA';
-        const scorePrioridad = tieneCobertura ? 85.0 : 10.0;
+        if (checkContacto.recordset.length > 0) {
+            // Ya existe: actualizar nombre si se conoce más información
+            contactoId = checkContacto.recordset[0].contacto_id;
+            await new sql.Request(transaction)
+                .input('contacto_id', sql.Int,       contactoId)
+                .input('nombres',     sql.VarChar(100), data.nombres || 'Estudiante')
+                .input('apellidos',   sql.VarChar(100), data.apellidos || null)
+                .input('correo',      sql.VarChar(150), data.correo   || null)
+                .query(`
+                    UPDATE CONTACTO
+                    SET  nombres   = @nombres,
+                         apellidos = @apellidos,
+                         correo    = ISNULL(@correo, correo)
+                    WHERE contacto_id = @contacto_id
+                `);
+            console.log(`   ♻️  CONTACTO existente actualizado: ID ${contactoId}`);
+        } else {
+            // Nuevo contacto
+            const insContacto = await new sql.Request(transaction)
+                .input('nombres',   sql.VarChar(100),  data.nombres   || 'Estudiante WhatsApp')
+                .input('apellidos', sql.VarChar(100),  data.apellidos || null)
+                .input('whatsapp',  sql.VarChar(30),   data.whatsapp)
+                .input('correo',    sql.VarChar(150),  data.correo    || null)
+                .query(`
+                    INSERT INTO CONTACTO (
+                        nombres, apellidos, whatsapp, correo,
+                        consentimiento_contacto, fecha_consentimiento,
+                        no_contactar, fecha_registro, estado
+                    ) VALUES (
+                        @nombres, @apellidos, @whatsapp, @correo,
+                        1, SYSDATETIME(),
+                        0, SYSDATETIME(), 'ACTIVO'
+                    );
+                    SELECT SCOPE_IDENTITY() AS contacto_id;
+                `);
+            contactoId = insContacto.recordset[0].contacto_id;
+            console.log(`   ✅ CONTACTO nuevo creado: ID ${contactoId}`);
+        }
 
-        // 3. Upsert en la tabla BUYER
-        await transaction.request()
-            .input('id_contacto', sql.Int, contactoId)
-            .input('estado', sql.VarChar(50), estadoBuyer)
-            .input('score', sql.Decimal(5, 2), scorePrioridad)
-            .input('motivo', sql.VarChar(255), motivoClasificacion || `Evaluado por Vicky: ${estadoBuyer}`)
-            .query(`
-                MERGE INTO BUYER AS target
-                USING (SELECT @id_contacto AS id_contacto) AS source
-                ON (target.id_contacto = source.id_contacto)
-                WHEN MATCHED THEN
-                    UPDATE SET estado = @estado, score_prioridad = @score, motivo_clasificacion = @motivo, fecha_clasificacion = GETDATE()
-                WHEN NOT MATCHED THEN
-                    INSERT (id_contacto, estado, score_prioridad, motivo_clasificacion, fecha_clasificacion)
-                    VALUES (@id_contacto, @estado, @score, @motivo, GETDATE());
-            `);
 
+        // ...
+        const estadoBuyer = data.tiene_cobertura ? 'ACTIVO' : 'SIN_COBERTURA';
+
+        const checkBuyer = await new sql.Request(transaction)
+            .input('contacto_id', sql.Int, contactoId)
+            .query(`SELECT buyer_id, estado FROM BUYER WHERE contacto_id = @contacto_id`);
+
+        let buyerId;
+
+        if (checkBuyer.recordset.length > 0) {
+            buyerId = checkBuyer.recordset[0].buyer_id;
+            await new sql.Request(transaction)
+                .input('buyer_id',  sql.Int,        buyerId)
+                .input('estado',    sql.VarChar(30), estadoBuyer)
+                .input('necesidad', sql.VarChar(150), (data.necesidad_inicial || 'Asesoría de Tesis').substring(0, 150))
+                .query(`
+                    UPDATE BUYER
+                    SET  estado            = @estado,
+                         necesidad_inicial = @necesidad,
+                         fecha_buyer       = SYSDATETIME()
+                    WHERE buyer_id = @buyer_id
+                `);
+            console.log(`   ♻️  BUYER actualizado: ID ${buyerId} → ${estadoBuyer}`);
+        } else {
+            const insBuyer = await new sql.Request(transaction)
+                .input('contacto_id',       sql.Int,        contactoId)
+                .input('canal_captacion_id', sql.Int,       1)   // WhatsApp orgánico
+                .input('servicio_interes_id',sql.Int,       2)   // Proyecto de Tesis
+                .input('necesidad_inicial',  sql.VarChar(150), (data.necesidad_inicial || 'Asesoría Integral de Tesis').substring(0, 150))
+                .input('estado',             sql.VarChar(30),  estadoBuyer)
+                .query(`
+                    INSERT INTO BUYER (
+                        contacto_id, canal_captacion_id, campania_id,
+                        servicio_interes_id, necesidad_inicial,
+                        fecha_buyer, estado
+                    ) VALUES (
+                        @contacto_id, @canal_captacion_id, NULL,
+                        @servicio_interes_id, @necesidad_inicial,
+                        SYSDATETIME(), @estado
+                    );
+                    SELECT SCOPE_IDENTITY() AS buyer_id;
+                `);
+            buyerId = insBuyer.recordset[0].buyer_id;
+            console.log(`   ✅ BUYER nuevo: ID ${buyerId} → ${estadoBuyer}`);
+        }
+
+        // ── COMMIT atómico ────────────────────────────────────────────────────
         await transaction.commit();
-        console.log(`[BUYER OK] Contacto ${contactoId} clasificado como: ${estadoBuyer}`);
-        return { success: true, estado: estadoBuyer, score: scorePrioridad };
-    } catch (err) {
-        await transaction.rollback();
-        console.error('[ERROR TRANSACCIONAL BUYER]:', err.message);
-        throw err;
-    }
-}
+        console.log(`   🎉 Transacción COMMIT OK · BUYER ${buyerId} [${estadoBuyer}]`);
 ```
 
-Descripción: se muestra el código para registrar transaccionalmente la segmentación del prospecto en las tablas PERFIL_ACADEMICO y BUYER de SQL Server, asignando el estado ACTIVO o SIN_COBERTURA junto a su puntaje de prioridad.
+Descripción: se muestra el código para registrar de manera atómica al estudiante en CONTACTO, PERFIL_ACADEMICO y BUYER en SQL Server, asignando el estado ACTIVO o SIN_COBERTURA según el resultado de la cobertura.
 
 ---
 
@@ -249,129 +273,107 @@ Descripción: se muestra el código para registrar transaccionalmente la segment
 #### 4. Cálculo de Indicadores BI (KPIs B01, B02, B06, B07)
 
 **ACÁ COLOCAR IMAGEN del archivo server_dashboard.js**  
-*(app.get('/api/kpis'))*
+*(app.get('/api/kpis') (líneas 102–146))*
 
 ```javascript
-// server_dashboard.js - Endpoint analítico para cálculo de KPIs B01, B02, B06 y B07
 app.get('/api/kpis', async (req, res) => {
     try {
-        const pool = await getPool();
-
-        // 1. Consulta analítica consolidada de volúmenes de captación y cobertura
-        const kpiQuery = `
-            SELECT 
-                COUNT(c.id_contacto) AS total_contactos,
-                SUM(CASE WHEN b.estado = 'ACTIVO' THEN 1 ELSE 0 END) AS buyers_activos,
-                SUM(CASE WHEN b.estado = 'SIN_COBERTURA' THEN 1 ELSE 0 END) AS sin_cobertura,
-                SUM(CASE WHEN pa.id_perfil IS NOT NULL THEN 1 ELSE 0 END) AS evaluados
-            FROM CONTACTO c
-            LEFT JOIN PERFIL_ACADEMICO pa ON c.id_contacto = pa.id_contacto
-            LEFT JOIN BUYER b ON c.id_contacto = b.id_contacto
+        const p = await getPool();
+        const query = `
+            SELECT
+                total_buyers = (SELECT COUNT(*) FROM BUYER),
+                total_leads  = (SELECT COUNT(*) FROM LEAD),
+                interacciones_valor = (SELECT COUNT(*) FROM INTERACCION_CAPTACION WHERE es_valor = 1),
+                demanda_sin_cobertura = (SELECT COUNT(*) FROM BUYER WHERE estado = 'SIN_COBERTURA'),
+                total_inversion = (SELECT ISNULL(SUM(inversion), 0) FROM CAMPANIA);
         `;
-        const result = await pool.request().query(kpiQuery);
-        const data = result.recordset[0] || {};
+        const result = await p.request().query(query);
+        const row = result.recordset[0];
 
-        const totalContactos = data.total_contactos || 0;
-        const buyersActivos = data.buyers_activos || 0;
-        const sinCobertura = data.sin_cobertura || 0;
-        const evaluados = data.evaluados || 0;
+        const total_buyers = parseInt(row.total_buyers, 10) || 0;
+        const total_leads = parseInt(row.total_leads, 10) || 0;
+        const interacciones_valor = parseInt(row.interacciones_valor, 10) || 0;
+        const demanda_sin_cobertura = parseInt(row.demanda_sin_cobertura, 10) || 0;
+        const total_inversion = parseFloat(row.total_inversion) || 0.0;
 
-        // KPI B01: Tasa de Conversión (Leads Calificados vs Total Contactos)
-        const tasaConversion = totalContactos > 0 
-            ? ((buyersActivos / totalContactos) * 100).toFixed(1) 
-            : 0;
+        const b01 = total_buyers > 0 ? (total_leads / total_buyers * 100.0) : 0.0;
+        const b02 = total_buyers > 0 ? (interacciones_valor / total_buyers * 100.0) : 0.0;
+        const b06 = demanda_sin_cobertura;
+        const b07 = total_buyers > 0 ? (total_inversion / total_buyers) : 0.0;
+        const buyers_activos = total_buyers - demanda_sin_cobertura;
+        const tasa_cobertura = total_buyers > 0 ? (buyers_activos / total_buyers * 100.0) : 0.0;
 
-        // KPI B02: Tasa de Interacción de Valor (% Evaluados vs Total Contactos)
-        const tasaInteraccion = totalContactos > 0 
-            ? ((evaluados / totalContactos) * 100).toFixed(1) 
-            : 0;
-
-        // KPI B06: Demanda Fuera de Cobertura (Conteo en lista de espera)
-        const fueraCobertura = sinCobertura;
-
-        // KPI B07: Costo por Prospecto (Inversión estimada / Contactos calificados)
-        const inversionEstimada = 120.00; // S/. presupuesto asignado
-        const costoPorLead = buyersActivos > 0 
-            ? (inversionEstimada / buyersActivos).toFixed(2) 
-            : '0.00';
-
-        // 2. Respuesta estructurada para las tarjetas de React
         res.json({
-            kpi_b01: { valor: `${tasaConversion}%`, label: 'Tasa de Conversión', detalle: `${buyersActivos} de ${totalContactos} buyers calificados` },
-            kpi_b02: { valor: `${tasaInteraccion}%`, label: 'Interacción de Valor', detalle: `${evaluados} con perfil académico completo` },
-            kpi_b06: { valor: fueraCobertura, label: 'Fuera de Cobertura', detalle: 'Prospectos en lista de espera preferencial' },
-            kpi_b07: { valor: `S/. ${costoPorLead}`, label: 'Costo por Prospecto', detalle: `Basado en S/. ${inversionEstimada} de inversión` },
-            resumen: { totalContactos, buyersActivos, sinCobertura, evaluados }
+            b01: Number(b01.toFixed(1)),
+            b02: Number(b02.toFixed(1)),
+            b06: b06,
+            b07: Number(b07.toFixed(2)),
+            total_buyers,
+            total_leads,
+            interacciones_valor,
+            demanda_sin_cobertura,
+            buyers_activos,
+            tasa_cobertura: Number(tasa_cobertura.toFixed(1)),
+            total_inversion: Number(total_inversion.toFixed(2))
         });
     } catch (err) {
-        console.error('[API ERROR] Error en /api/kpis:', err.message);
-        res.status(500).json({ error: 'Fallo al consultar métricas analíticas en SQL Server' });
+        console.error('❌ [API /kpis] Error:', err.message);
+        res.status(500).json({ error: err.message });
     }
 });
 ```
 
-Descripción: se muestra el código para procesar los indicadores de inteligencia de negocios B01, B02, B06 y B07 sobre Microsoft SQL Server, entregando en formato JSON las métricas que alimentan las tarjetas del dashboard en tiempo real.
+Descripción: se muestra el código para procesar los indicadores de inteligencia de negocios B01 (Conversión), B02 (Interacción de valor), B06 (Demanda sin cobertura) y B07 (Costo por Buyer) directamente sobre SQL Server.
 
 ---
 
 #### 5. Consulta y sincronización de trazabilidad de prospectos
 
 **ACÁ COLOCAR IMAGEN del archivo server_dashboard.js**  
-*(app.get('/api/buyers'))*
+*(app.get('/api/buyers') (líneas 151–188))*
 
 ```javascript
-// server_dashboard.js - Endpoint para listar la trazabilidad completa de prospectos
 app.get('/api/buyers', async (req, res) => {
     try {
-        const pool = await getPool();
-
-        // Consulta relacional uniendo CONTACTO, PERFIL_ACADEMICO, BUYER y UNIVERSIDAD
+        const p = await getPool();
         const query = `
             SELECT 
-                b.id_buyer,
-                c.id_contacto,
-                c.nombre_completo,
-                c.telefono,
-                ISNULL(u.nombre, pa.universidad_declarada) AS universidad,
-                ISNULL(car.nombre, pa.carrera_declarada) AS carrera,
-                pa.fase_tesis,
-                b.estado,
-                b.score_prioridad,
-                b.motivo_clasificacion,
-                FORMAT(b.fecha_clasificacion, 'yyyy-MM-dd HH:mm') AS fecha_registro
+                b.buyer_id,
+                b.fecha_buyer,
+                b.estado AS estado_buyer,
+                b.necesidad_inicial,
+                c.contacto_id,
+                c.nombres,
+                c.apellidos,
+                CONCAT(c.nombres, CASE WHEN c.apellidos IS NOT NULL AND c.apellidos NOT IN ('', 'Por Asignar') THEN ' ' + c.apellidos ELSE '' END) AS nombre_completo,
+                c.whatsapp,
+                c.correo,
+                pa.etapa_academica,
+                pa.ciclo,
+                pa.sede,
+                cr.carrera_id,
+                cr.nombre AS carrera,
+                cr.atendida AS carrera_atendida,
+                u.universidad_id,
+                u.nombre AS universidad,
+                u.atendida AS universidad_atendida
             FROM BUYER b
-            INNER JOIN CONTACTO c ON b.id_contacto = c.id_contacto
-            LEFT JOIN PERFIL_ACADEMICO pa ON c.id_contacto = pa.id_contacto
-            LEFT JOIN UNIVERSIDAD u ON pa.id_universidad = u.id_universidad
-            LEFT JOIN CARRERA car ON pa.id_carrera = car.id_carrera
-            ORDER BY b.fecha_clasificacion DESC
+            INNER JOIN CONTACTO c ON c.contacto_id = b.contacto_id
+            LEFT JOIN PERFIL_ACADEMICO pa ON pa.contacto_id = c.contacto_id
+            LEFT JOIN CARRERA cr ON cr.carrera_id = pa.carrera_id
+            LEFT JOIN UNIVERSIDAD u ON u.universidad_id = cr.universidad_id
+            ORDER BY b.buyer_id DESC;
         `;
-
-        const result = await pool.request().query(query);
-
-        const buyersFormat = result.recordset.map(row => ({
-            id: row.id_buyer,
-            contactoId: row.id_contacto,
-            nombre: row.nombre_completo,
-            telefono: row.telefono,
-            universidad: row.universidad || 'No especificada',
-            carrera: row.carrera || 'No especificada',
-            faseTesis: row.fase_tesis || 'En consulta inicial',
-            estado: row.estado,
-            score: row.score_prioridad,
-            motivo: row.motivo_clasificacion,
-            fecha: row.fecha_registro
-        }));
-
-        res.json(buyersFormat);
+        const result = await p.request().query(query);
+        res.json(result.recordset);
     } catch (err) {
-        console.error('[API ERROR] Error en /api/buyers:', err.message);
-        res.status(500).json({ error: 'Fallo al consultar la trazabilidad de buyers' });
+        console.error('❌ [API /buyers] Error:', err.message);
+        res.status(500).json({ error: err.message });
     }
 });
 ```
 
-Descripción: se muestra el código para consultar y transformar la trazabilidad de los prospectos almacenados en SQL Server, uniendo las tablas BUYER, CONTACTO y PERFIL_ACADEMICO para alimentar la tabla de seguimiento del administrador.
+Descripción: se muestra el código para consultar la trazabilidad completa de los prospectos almacenados en SQL Server, uniendo las tablas BUYER, CONTACTO, PERFIL_ACADEMICO, CARRERA y UNIVERSIDAD en orden descendente.
 
 ---
 
@@ -380,291 +382,221 @@ Descripción: se muestra el código para consultar y transformar la trazabilidad
 #### 6. Componente de Resumen Ejecutivo y Cuadro de Mando BI
 
 **ACÁ COLOCAR IMAGEN del archivo frontend/src/components/KpiCards.jsx**  
-*(KpiCards({ kpis }))*
+*(KpiCards({ kpis }) (líneas 4–68))*
 
 ```javascript
-// frontend/src/components/KpiCards.jsx - Renderizado de tarjetas de KPIs ejecutivos
-import React from 'react';
-
 export default function KpiCards({ kpis }) {
-  if (!kpis) return null;
-
-  const cards = [
-    {
-      kpiId: 'B01',
-      title: 'Tasa de Conversión',
-      value: kpis.kpi_b01?.valor || '0.0%',
-      detalle: kpis.kpi_b01?.detalle,
-      color: 'border-l-indigo-500 text-indigo-600',
-      badge: 'bg-indigo-50 text-indigo-700',
-      icon: '🎯'
-    },
-    {
-      kpiId: 'B02',
-      title: 'Interacción de Valor',
-      value: kpis.kpi_b02?.valor || '0.0%',
-      detalle: kpis.kpi_b02?.detalle,
-      color: 'border-l-emerald-500 text-emerald-600',
-      badge: 'bg-emerald-50 text-emerald-700',
-      icon: '⚡'
-    },
-    {
-      kpiId: 'B06',
-      title: 'Fuera de Cobertura',
-      value: kpis.kpi_b06?.valor || '0',
-      detalle: kpis.kpi_b06?.detalle,
-      color: 'border-l-rose-500 text-rose-600',
-      badge: 'bg-rose-50 text-rose-700',
-      icon: '🚫'
-    },
-    {
-      kpiId: 'B07',
-      title: 'Costo por Prospecto',
-      value: kpis.kpi_b07?.valor || 'S/. 0.00',
-      detalle: kpis.kpi_b07?.detalle,
-      color: 'border-l-amber-500 text-amber-600',
-      badge: 'bg-amber-50 text-amber-700',
-      icon: '💰'
-    }
-  ];
-
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-      {cards.map((c) => (
-        <div
-          key={c.kpiId}
-          className={`bg-white rounded-xl shadow-sm border border-slate-200 border-l-4 ${c.color} p-5 transition hover:shadow-md`}
-        >
-          <div className="flex items-center justify-between">
-            <span className={`px-2 py-0.5 rounded text-xs font-bold ${c.badge}`}>
-              KPI {c.kpiId}
+    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
+      {/* KPI B01 */}
+      <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-200 border-l-4 border-l-emerald-500 hover:shadow-md transition">
+        <div className="flex justify-between items-start">
+          <div>
+            <span className="text-[11px] font-bold text-emerald-600 uppercase tracking-wider bg-emerald-50 px-2 py-0.5 rounded">
+              KPI B01 · Oficial
             </span>
-            <span className="text-xl">{c.icon}</span>
+            <h3 className="text-sm font-semibold text-slate-600 mt-2">Tasa Conversión a LEAD</h3>
           </div>
-          <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-wider mt-3">
-            {c.title}
-          </h3>
-          <div className="text-2xl font-black text-slate-800 mt-1">
-            {c.value}
+          <div className="w-10 h-10 rounded-xl bg-emerald-100 text-emerald-600 flex items-center justify-center">
+            <UserCheck className="w-5 h-5" />
           </div>
-          <p className="text-xs text-slate-500 mt-2 truncate">
-            {c.detalle}
-          </p>
         </div>
-      ))}
-    </div>
-  );
-}
+        <div className="mt-4 flex items-baseline space-x-2">
+          <span className="text-3xl font-extrabold text-slate-900">{kpis?.b01}%</span>
+          <span className="text-xs text-slate-500 font-medium">efectividad</span>
+        </div>
+        <div className="w-full bg-slate-100 rounded-full h-2 mt-3 overflow-hidden">
+          <div className="bg-emerald-500 h-2 rounded-full" style={{ width: `${Math.min(kpis?.b01 || 0, 100)}%` }}></div>
+        </div>
+        <p className="text-xs text-slate-500 mt-3 flex justify-between">
+          <span>{kpis?.total_leads} leads generados</span>
+          <span className="font-medium text-slate-700">de {kpis?.total_buyers} buyers</span>
+        </p>
+      </div>
+
+      {/* KPI B02 */}
+      <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-200 border-l-4 border-l-blue-500 hover:shadow-md transition">
+        <div className="flex justify-between items-start">
+          <div>
+            <span className="text-[11px] font-bold text-blue-600 uppercase tracking-wider bg-blue-50 px-2 py-0.5 rounded">
+              KPI B02 · Oficial
+            </span>
+            <h3 className="text-sm font-semibold text-slate-600 mt-2">Tasa Interacción de Valor</h3>
+          </div>
+          <div className="w-10 h-10 rounded-xl bg-blue-100 text-blue-600 flex items-center justify-center">
+            <Sparkles className="w-5 h-5" />
+          </div>
+        </div>
+        <div className="mt-4 flex items-baseline space-x-2">
+          <span className="text-3xl font-extrabold text-slate-900">{kpis?.b02}%</span>
+          <span className="text-xs text-slate-500 font-medium">relevancia</span>
+        </div>
+        <div className="w-full bg-slate-100 rounded-full h-2 mt-3 overflow-hidden">
+          <div className="bg-blue-500 h-2 rounded-full" style={{ width: `${Math.min(kpis?.b02 || 0, 100)}%` }}></div>
+        </div>
+        <p className="text-xs text-slate-500 mt-3 flex justify-between">
+          <span>{kpis?.interacciones_valor} interacciones clave</span>
+          <span className="font-medium text-slate-700">en WhatsApp</span>
+        </p>
+      </div>
+
+      {/* KPI B06 */}
+      <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-200 border-l-4 border-l-rose-500 hover:shadow-md transition">
+        <div className="flex justify-between items-start">
+          <div>
+            <span className="text-[11px] font-bold text-rose-600 uppercase tracking-wider bg-rose-50 px-2 py-0.5 rounded">
+              KPI B06 · Demanda
+            </span>
+            <h3 className="text-sm font-semibold text-slate-600 mt-2">Fuera de Cobertura</h3>
+          </div>
+          <div className="w-10 h-10 rounded-xl bg-rose-100 text-rose-600 flex items-center justify-center">
 ```
 
-Descripción: se muestra el código para renderizar las cuatro tarjetas de indicadores clave de rendimiento (B01, B02, B06 y B07) en la interfaz de React, formateando los valores analíticos y sus etiquetas de estado de manera reactiva.
+Descripción: se muestra el código para renderizar las tarjetas ejecutivas de los KPIs B01, B02, B06 y B07 en React, desplegando valores porcentuales, barras de progreso y comparativas de efectividad en tiempo real.
 
 ---
 
 #### 7. Componente de Trazabilidad y Búsqueda de Buyers
 
 **ACÁ COLOCAR IMAGEN del archivo frontend/src/components/BuyersTable.jsx**  
-*(BuyersTable({ buyers, searchTerm, setSearchTerm, filterStatus, setFilterStatus, onOpenChat }))*
+*(BuyersTable(...) (líneas 4–64))*
 
 ```javascript
-// frontend/src/components/BuyersTable.jsx - Tabla interactiva de trazabilidad y filtrado
-import React, { useMemo } from 'react';
-
-export default function BuyersTable({
-  buyers = [],
-  searchTerm,
-  setSearchTerm,
-  filterStatus,
-  setFilterStatus,
-  onOpenChat
-}) {
-  // Filtrado reactivo en memoria por texto y estado
-  const filteredBuyers = useMemo(() => {
-    return buyers.filter((b) => {
+export default function BuyersTable({ buyers, searchTerm, setSearchTerm, filterStatus, setFilterStatus, onOpenChat }) {
+  const filtered = useMemo(() => {
+    return buyers.filter(b => {
       const matchSearch =
-        searchTerm === '' ||
-        b.nombre?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        b.telefono?.includes(searchTerm) ||
-        b.universidad?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        b.carrera?.toLowerCase().includes(searchTerm.toLowerCase());
+        (b.nombre_completo || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
+        (b.universidad || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
+        (b.carrera || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
+        (b.whatsapp || '').includes(searchTerm);
 
-      const matchStatus =
-        filterStatus === 'ALL' ||
-        (filterStatus === 'ACTIVO' && b.estado === 'ACTIVO') ||
-        (filterStatus === 'SIN_COBERTURA' && b.estado === 'SIN_COBERTURA');
-
-      return matchSearch && matchStatus;
+      const matchFilter = filterStatus === 'ALL' ? true : b.estado_buyer === filterStatus;
+      return matchSearch && matchFilter;
     });
   }, [buyers, searchTerm, filterStatus]);
 
   return (
-    <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-      {/* Barra de Filtros y Búsqueda */}
-      <div className="p-4 border-b border-slate-100 flex flex-col sm:flex-row justify-between items-center gap-3">
-        <input
-          type="text"
-          placeholder="Buscar por nombre, teléfono, universidad..."
-          value={searchTerm}
-          onChange={(e) => setSearchTerm(e.target.value)}
-          className="w-full sm:w-80 px-4 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-        />
-        <div className="flex space-x-2">
-          {['ALL', 'ACTIVO', 'SIN_COBERTURA'].map((st) => (
+    <div className="bg-white rounded-2xl p-6 shadow-sm border border-slate-200 space-y-5">
+      <div className="flex flex-col md:flex-row justify-between items-stretch md:items-center gap-4">
+        <div>
+          <h2 className="text-lg font-bold text-slate-900">Trazabilidad de Prospectos (Fase BUYER)</h2>
+          <p className="text-xs text-slate-500">Mostrando {filtered.length} de {buyers.length} registros en SQL Server</p>
+        </div>
+
+        <div className="flex flex-col sm:flex-row gap-3">
+          <div className="relative">
+            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
+            <input
+              type="text"
+              placeholder="Buscar por nombre, carrera o uni..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              className="pl-9 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 w-full sm:w-64"
+            />
+          </div>
+
+          <div className="flex rounded-xl bg-slate-100 p-1 border border-slate-200 text-xs font-semibold">
             <button
-              key={st}
-              onClick={() => setFilterStatus(st)}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition ${
-                filterStatus === st
-                  ? 'bg-indigo-600 text-white'
-                  : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-              }`}
+              onClick={() => setFilterStatus('ALL')}
+              className={`px-3 py-1.5 rounded-lg transition ${filterStatus === 'ALL' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600'}`}
             >
-              {st === 'ALL' ? 'Todos' : st === 'ACTIVO' ? 'Con Cobertura' : 'Sin Cobertura'}
+              Todos
             </button>
-          ))}
+            <button
+              onClick={() => setFilterStatus('ACTIVO')}
+              className={`px-3 py-1.5 rounded-lg transition ${filterStatus === 'ACTIVO' ? 'bg-emerald-600 text-white shadow-sm' : 'text-slate-600'}`}
+            >
+              Activos
+            </button>
+            <button
+              onClick={() => setFilterStatus('SIN_COBERTURA')}
+              className={`px-3 py-1.5 rounded-lg transition ${filterStatus === 'SIN_COBERTURA' ? 'bg-rose-600 text-white shadow-sm' : 'text-slate-600'}`}
+            >
+              Sin Cobertura
+            </button>
+          </div>
         </div>
       </div>
 
-      {/* Tabla de Datos */}
-      <div className="overflow-x-auto">
-        <table className="w-full text-left text-sm text-slate-600">
-          <thead className="bg-slate-50 text-xs uppercase font-bold text-slate-500 border-b border-slate-200">
+      <div className="overflow-x-auto rounded-xl border border-slate-200">
+        <table className="w-full text-left text-xs sm:text-sm">
+          <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 uppercase text-[11px] font-bold">
             <tr>
-              <th className="py-3 px-4">Estudiante</th>
-              <th className="py-3 px-4">Universidad</th>
-              <th className="py-3 px-4">Carrera</th>
-              <th className="py-3 px-4">Estado</th>
-              <th className="py-3 px-4 text-center">Acción</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100">
-            {filteredBuyers.map((b) => (
-              <tr key={b.id} className="hover:bg-slate-50 transition">
-                <td className="py-3 px-4 font-semibold text-slate-800">{b.nombre}</td>
-                <td className="py-3 px-4">{b.universidad}</td>
-                <td className="py-3 px-4">{b.carrera}</td>
-                <td className="py-3 px-4">
-                  <span className={`px-2.5 py-1 rounded-full text-xs font-bold ${
-                    b.estado === 'ACTIVO' ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'
-                  }`}>
-                    {b.estado}
-                  </span>
-                </td>
-                <td className="py-3 px-4 text-center">
-                  <button
-                    onClick={() => onOpenChat(b.telefono)}
-                    className="px-3 py-1 bg-indigo-50 text-indigo-600 rounded-md text-xs font-bold hover:bg-indigo-100 transition"
-                  >
-                    💬 Chat
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
 ```
 
-Descripción: se muestra el código para desplegar la tabla interactiva de prospectos clasificados, implementando filtros reactivos en memoria por texto y estado de cobertura, además del enlace directo a la auditoría del chat de WhatsApp.
+Descripción: se muestra el código para construir la tabla interactiva de prospectos en React, aplicando filtros reactivos en memoria por nombre, universidad, carrera y estado (ACTIVO / SIN_COBERTURA).
 
 ---
 
 #### 8. Componente de Auditoría de WhatsApp en Vivo
 
 **ACÁ COLOCAR IMAGEN del archivo frontend/src/components/ChatAuditor.jsx**  
-*(ChatAuditor({ conversaciones, buyers, selectedPhone, setSelectedPhone }))*
+*(ChatAuditor(...) (líneas 4–62))*
 
 ```javascript
-// frontend/src/components/ChatAuditor.jsx - Consola en vivo estilo WhatsApp Web
-import React, { useMemo, useEffect, useRef } from 'react';
+export default function ChatAuditor({ conversaciones, buyers, selectedPhone, setSelectedPhone }) {
+  // Agrupar mensajes y ordenar desde la última conversación hacia abajo
+  const chatsPorTelefono = useMemo(() => {
+    const map = {};
+    conversaciones.forEach(m => {
+      const wa = m.whatsapp;
+      if (!map[wa]) {
+        map[wa] = {
+          whatsapp: wa,
+          nombre: m.nombre_completo,
+          mensajes: [],
+          ultimoTimestamp: 0,
+          ultimoMensajeId: 0
+        };
+      }
+      map[wa].mensajes.push(m);
+      const msgTime = new Date(m.fecha_mensaje).getTime() || 0;
+      if (msgTime >= map[wa].ultimoTimestamp) {
+        map[wa].ultimoTimestamp = msgTime;
+        map[wa].ultimoMensajeId = m.mensaje_id || 0;
+      }
+    });
 
-export default function ChatAuditor({
-  conversaciones = [],
-  buyers = [],
-  selectedPhone,
-  setSelectedPhone
-}) {
-  const chatBottomRef = useRef(null);
-
-  // Ordenar chats con el mensaje más reciente en el tope (#1 descendente)
-  const sortedConversaciones = useMemo(() => {
-    return [...conversaciones].sort((a, b) => (b.ultimoMensajeId || 0) - (a.ultimoMensajeId || 0));
+    // Ordenar de la última conversación (más reciente) hacia abajo
+    return Object.values(map).sort((a, b) => {
+      if (b.ultimoMensajeId !== a.ultimoMensajeId) {
+        return b.ultimoMensajeId - a.ultimoMensajeId;
+      }
+      return b.ultimoTimestamp - a.ultimoTimestamp;
+    });
   }, [conversaciones]);
 
   const activeChat = useMemo(() => {
-    if (!selectedPhone && sortedConversaciones.length > 0) {
-      return sortedConversaciones[0];
+    if (selectedPhone) {
+      return chatsPorTelefono.find(c => c.whatsapp === selectedPhone) || chatsPorTelefono[0];
     }
-    return sortedConversaciones.find((c) => c.telefono === selectedPhone) || sortedConversaciones[0];
-  }, [sortedConversaciones, selectedPhone]);
+    return chatsPorTelefono[0] || null;
+  }, [chatsPorTelefono, selectedPhone]);
 
+  const messagesEndRef = useRef(null);
   useEffect(() => {
-    chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [activeChat]);
+    if (messagesEndRef.current) {
+      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [activeChat, conversaciones]);
+
+  const buyerRelacionado = useMemo(() => {
+    if (!activeChat) return null;
+    return buyers.find(b => b.whatsapp === activeChat.whatsapp);
+  }, [activeChat, buyers]);
 
   return (
-    <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden h-[600px] flex">
-      {/* Columna Izquierda: Lista de Contactos WhatsApp */}
-      <div className="w-1/3 border-r border-slate-200 flex flex-col bg-slate-50">
-        <div className="p-3 bg-slate-100 font-bold text-sm text-slate-700 border-b border-slate-200">
-          Chats Recientes ({sortedConversaciones.length})
-        </div>
-        <div className="flex-1 overflow-y-auto divide-y divide-slate-100">
-          {sortedConversaciones.map((conv) => (
-            <div
-              key={conv.id_conversacion}
-              onClick={() => setSelectedPhone(conv.telefono)}
-              className={`p-3 cursor-pointer transition flex items-center justify-between ${
-                activeChat?.id_conversacion === conv.id_conversacion ? 'bg-indigo-50 border-r-4 border-indigo-600' : 'hover:bg-slate-100'
-              }`}
-            >
-              <div>
-                <p className="font-semibold text-slate-800 text-sm">{conv.nombre_completo}</p>
-                <p className="text-xs text-slate-400 truncate w-40">{conv.ultimo_mensaje || 'Conversación iniciada'}</p>
-              </div>
-              <span className="text-[10px] text-slate-400">{conv.hora_ultimo_msg || ''}</span>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* Columna Derecha: Ventana de Chat en Vivo */}
-      <div className="w-2/3 flex flex-col bg-[#e5ddd5]/30">
-        <div className="p-3 bg-white border-b border-slate-200 flex justify-between items-center shadow-sm">
-          <div>
-            <h4 className="font-bold text-sm text-slate-800">{activeChat?.nombre_completo}</h4>
-            <p className="text-xs text-emerald-600 font-semibold">● Vicky (Agente IA Activo)</p>
-          </div>
-          <span className="text-xs bg-slate-100 px-2.5 py-1 rounded-full font-bold text-slate-600">
-            {activeChat?.telefono}
-          </span>
-        </div>
-
-        {/* Historial de Mensajes */}
-        <div className="flex-1 p-4 overflow-y-auto space-y-3">
-          {activeChat?.mensajes?.map((m) => {
-            const isBot = m.remitente === 'AGENTE_VICKY';
-            return (
-              <div key={m.id_mensaje} className={`flex ${isBot ? 'justify-start' : 'justify-end'}`}>
-                <div className={`max-w-[75%] p-3 rounded-2xl shadow-sm text-sm ${
-                  isBot ? 'bg-white text-slate-800 rounded-tl-none' : 'bg-[#dcf8c6] text-slate-900 rounded-tr-none'
-                }`}>
-                  <p className="text-xs font-bold text-slate-500 mb-1">{isBot ? '🤖 Vicky' : '👤 Estudiante'}</p>
-                  <p>{m.contenido}</p>
-                  <span className="text-[10px] text-slate-400 block text-right mt-1">{m.hora}</span>
-                </div>
-              </div>
-            );
-          })}
-          <div ref={chatBottomRef} />
-        </div>
-      </div>
-    </div>
-  );
-}
+    <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex flex-col md:flex-row h-[680px]">
+      {/* Lista de Chats */}
+      <div className="w-full md:w-80 border-r border-slate-200 bg-white flex flex-col">
+        <div className="p-4 border-b border-slate-200 bg-slate-50">
+          <h3 className="font-bold text-slate-800 text-sm flex items-center gap-2">
+            <MessagesSquare className="w-4 h-4 text-indigo-600" />
+            <span>Conversaciones ({chatsPorTelefono.length})</span>
 ```
 
-Descripción: se muestra el código para auditar las conversaciones en tiempo real entre el agente Vicky y los estudiantes, renderizando una interfaz idéntica a WhatsApp Web ordenada de forma descendente según la última interacción.
+Descripción: se muestra el código para auditar las conversaciones de WhatsApp en tiempo real, agrupando los mensajes por número telefónico y ordenándolos cronológicamente desde la interacción más reciente hacia abajo.
+
+---
+
