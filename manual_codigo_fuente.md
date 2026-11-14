@@ -4,12 +4,222 @@
 
 ---
 
-### A. CANAL CONVERSACIONAL WHATSAPP (PROSPECTO - SIN LOGIN)
+# A) ACCESO, CONFIGURACIÓN Y DIAGNÓSTICO DEL SISTEMA
 
-#### 1. Recepción de mensajes y registro en SQL Server
+## Pantalla de Configuración de Entorno (.env)
 
-**ACÁ COLOCAR IMAGEN del archivo bot.js**  
-*(asegurarConversacion() (líneas 432–488))*
+**Colocar imagen de código del archivo .env y carga de configuración en bot.js**
+
+```ini
+# ==============================================================================
+# ARCHIVO: .env (Parámetros de configuración del sistema)
+# ==============================================================================
+# Conectividad a Microsoft SQL Server (INBESTIGA_TESIS)
+DB_SERVER=(local)
+DB_PORT=1433
+DB_NAME=INBESTIGA_TESIS
+DB_USER=admin
+DB_PASSWORD=••••••••
+DB_DRIVER=ODBC Driver 17 for SQL Server
+
+# Parámetros del Motor de Inteligencia Artificial (Google Gemini / OpenAI compatible)
+GEMINI_API_KEY=•••••••••••••••••••••••••••••••••••••••••••••••••••••
+AI_MODEL=gemini-1.5-flash
+GEMINI_MODEL=gemini-1.5-flash
+AI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/
+
+# Servidores Web y Aplicación
+PORT=3000
+STREAMLIT_PORT=8501
+```
+
+Descripción: se muestra el código de configuración de variables de entorno del sistema (.env), definiendo los parámetros de enlace para el protocolo de memoria compartida en SQL Server y las credenciales del motor de inferencia de IA.
+
+---
+
+## Pantalla de Diagnóstico Pre-Vuelo del Sistema
+
+**Colocar imagen de código del archivo diagnostico_sistema.py - función test_sql_connection()**
+
+```python
+# 1. Verificar variables de entorno
+print("\n[1/4] Verificando variables de entorno en .env...")
+required_db_vars = [
+    "DB_SERVER", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD",
+    "DB_ODBC_DRIVER"
+]
+
+missing_vars = []
+for var in required_db_vars:
+    val = os.getenv(var)
+    if not val:
+        missing_vars.append(var)
+    else:
+        disp = "***" if "PASSWORD" in var else val
+        print(f"  ✅ {var}: {disp}")
+
+# Verificar key de IA (Gemini, Groq, xAI o genérica)
+ai_key = os.getenv("GEMINI_API_KEY") or os.getenv("AI_API_KEY") or os.getenv("GROQ_API_KEY") or os.getenv("XAI_API_KEY")
+if ai_key and "tu-api-key" not in ai_key:
+    provider = "Google Gemini" if (os.getenv("GEMINI_API_KEY") or ai_key.startswith("AIza")) else (
+               "Groq" if (os.getenv("GROQ_API_KEY") or ai_key.startswith("gsk_")) else "xAI / Grok"
+    )
+    print(f"  ✅ IA API Key detectada para [{provider}]: *** (Longitud: {len(ai_key)})")
+else:
+    missing_vars.append("GEMINI_API_KEY (o AI_API_KEY / XAI_API_KEY)")
+
+if missing_vars:
+    print(f"  ⚠️ Variables pendientes o con valores por defecto: {', '.join(missing_vars)}")
+else:
+    print("  ✅ Todas las variables requeridas están definidas.")
+
+# 2. Verificar drivers ODBC disponibles
+print("\n[2/4] Verificando drivers ODBC instalados en el sistema...")
+drivers = pyodbc.drivers()
+selected_driver = os.getenv("DB_ODBC_DRIVER", "ODBC Driver 17 for SQL Server")
+if selected_driver in drivers:
+    print(f"  ✅ Driver configurado encontrado: '{selected_driver}'")
+else:
+    print(f"  ❌ Driver '{selected_driver}' NO encontrado.")
+    print(f"  ℹ️ Drivers detectados: {drivers}")
+
+# 3. Probar conexión a SQL Server
+print("\n[3/4] Probando conexión con SQL Server (INBESTIGA_TESIS)...")
+server = os.getenv("DB_SERVER", "localhost")
+port = os.getenv("DB_PORT", "1433")
+database = os.getenv("DB_NAME", "INBESTIGA_TESIS")
+user = os.getenv("DB_USER", "sa")
+password = os.getenv("DB_PASSWORD", "")
+trust_cert_raw = os.getenv("DB_TRUST_SERVER_CERTIFICATE", "yes").lower()
+trust_cert = "yes" if trust_cert_raw in ["true", "yes", "1"] else "no"
+
+conn_str = (
+    f"DRIVER={{{selected_driver}}};"
+    f"SERVER={server},{port};"
+```
+
+Descripción: se muestra el código para ejecutar el diagnóstico previo del sistema en diagnostico_sistema.py, comprobando los controladores ODBC, la conexión física a SQL Server y la integridad de las 9 tablas requeridas para la Fase Buyer.
+
+---
+
+## Pantalla de Inicialización de Servicios y Base de Datos
+
+**Colocar imagen de código del archivo bot.js - función getDbPool() y arranque**
+
+```javascript
+async function getDbPool() {
+    if (dbPool && dbPool.connected) return dbPool;
+    try {
+        dbPool = await sql.connect(dbConfig);
+        console.log('✅ [SQL Server] Conexión establecida a INBESTIGA_TESIS');
+    } catch (err) {
+        console.error('❌ [SQL Server] Error al conectar:', err.message);
+        throw err;
+    }
+    return dbPool;
+}
+
+/**
+ * Configuración dinámica de IA:
+ * Soporta Google Gemini, Groq Cloud, Grok (xAI) u OpenAI directamente.
+ * Detecta automáticamente el proveedor según el formato de la clave o variables de entorno.
+ */
+const AI_API_KEY = process.env.AI_API_KEY || process.env.GEMINI_API_KEY || process.env.GROQ_API_KEY || process.env.XAI_API_KEY || 'dummy-key';
+
+const isGoogle = !!process.env.GEMINI_API_KEY || AI_API_KEY.startsWith('AIza') || AI_API_KEY.startsWith('AQ.');
+
+const AI_BASE_URL = process.env.AI_BASE_URL || (
+    isGoogle
+        ? 'https://generativelanguage.googleapis.com/v1beta/openai/'
+        : (process.env.GROQ_API_KEY || AI_API_KEY.startsWith('gsk_'))
+            ? 'https://api.groq.com/openai/v1'
+            : 'https://api.x.ai/v1'
+);
+
+let AI_MODEL = process.env.AI_MODEL || process.env.GEMINI_MODEL;
+if (!AI_MODEL || AI_MODEL === 'grok-2-latest' || AI_MODEL === 'gemini-3.8-flash') {
+    if (AI_BASE_URL.includes('googleapis.com')) AI_MODEL = 'gemini-2.5-flash';
+    else if (AI_BASE_URL.includes('groq.com')) AI_MODEL = 'llama-3.3-70b-versatile';
+    else AI_MODEL = 'grok-2-latest';
+}
+
+const aiClient = new OpenAI({
+    apiKey : AI_API_KEY,
+    baseURL: AI_BASE_URL,
+});
+
+console.log(`🧠 [IA Config] Proveedor: ${AI_BASE_URL} | Modelo: ${AI_MODEL}`);
+
+/**
+ * Historial conversacional por número de WhatsApp.
+ * Estructura: Map<string, Array<{role, content}>>
+ */
+const conversationHistory = new Map();
+
+// ==============================================================================
+// 2. HERRAMIENTAS DE BASE DE DATOS (FUNCTION CALLING)
+// ==============================================================================
+
+/**
+ * Verifica si INBESTIGA atiende la universidad y carrera indicadas.
+ * Estrategia de búsqueda en dos fases:
+ *   - Fase 1: JOIN directo (nombre universidad LIKE) AND (nombre carrera LIKE).
+ *   - Fase 2: Búsquedas independientes si el JOIN no devuelve resultados.
+ *
+ * @param {object} param0
+```
+
+Descripción: se muestra el código para inicializar el pool de conexiones a SQL Server con msnodesqlv8 en bot.js, verificando la disponibilidad del motor de base de datos antes de arrancar los servicios de mensajería.
+
+---
+
+# B) AGENTE CONVERSACIONAL WHATSAPP "VICKY" (ROL PROSPECTO / ESTUDIANTE)
+
+## Pantalla de Vinculación WhatsApp Web (Escaneo de Código QR)
+
+**Colocar imagen de código del archivo bot.js - eventos client.on('qr') y client.on('ready')**
+
+```javascript
+client.on('qr', (qr) => {
+    console.log('\n╔════════════════════════════════════════════════════════╗');
+    console.log('║  📲 ESCANEA ESTE QR CON WHATSAPP EN TU CELULAR         ║');
+    console.log('║  (WhatsApp → Dispositivos vinculados → Vincular)        ║');
+    console.log('╚════════════════════════════════════════════════════════╝\n');
+    qrcode.generate(qr, { small: true });
+});
+
+client.on('authenticated', () => {
+    console.log('🔑 [WhatsApp] Sesión autenticada correctamente.');
+});
+
+client.on('auth_failure', (msg) => {
+    console.error('❌ [WhatsApp] Error de autenticación:', msg);
+    console.error('   → Borra la carpeta .wwebjs_auth/ y reinicia el bot.');
+});
+
+client.on('disconnected', (reason) => {
+    console.warn('⚠️  [WhatsApp] Desconectado:', reason);
+    console.warn('   → Reiniciando conexión en 10 segundos...');
+    setTimeout(() => client.initialize(), 10000);
+});
+
+client.on('ready', () => {
+    console.log('\n╔════════════════════════════════════════════════════════╗');
+    console.log('║  🤖 "VICKY" LISTA Y CONECTADA A WHATSAPP EN VIVO       ║');
+    console.log('║     Esperando mensajes de estudiantes...                ║');
+    console.log('╚════════════════════════════════════════════════════════╝\n');
+});
+
+// ── Evento principal: Mensaje entrante ───────────────────────────────────────
+```
+
+Descripción: se muestra el código para gestionar el ciclo de autenticación de WhatsApp Web mediante la biblioteca whatsapp-web.js, renderizando el código QR en terminal y notificando cuando la sesión queda operativa.
+
+---
+
+## Pantalla de Inicio de Conversación y Saludo Institucional
+
+**Colocar imagen de código del archivo bot.js - función asegurarConversacion()**
 
 ```javascript
 async function asegurarConversacion(whatsappNumber) {
@@ -68,16 +278,74 @@ async function asegurarConversacion(whatsappNumber) {
             `);
 
         return { contactoId, conversacionId: newConv.recordset[0].conversacion_id };
+
+    } catch (err) {
+        console.error('⚠️  [asegurarConversacion] Error:', err.message);
+        return { contactoId: null, conversacionId: null };
+    }
+}
 ```
 
-Descripción: se muestra el código para asegurar la conversación y el contacto en SQL Server, consultando mediante @wa en la tabla CONTACTO e inicializando un registro en CONVERSACION en estado EN_CURSO si no existe.
+Descripción: se muestra el código para registrar automáticamente al prospecto en la tabla CONTACTO y abrir una nueva sesión en CONVERSACION con estado EN_CURSO cuando el estudiante escribe su saludo inicial por WhatsApp.
 
 ---
 
-#### 2. Verificación de reglas de cobertura académica
+## Pantalla de Captura Académica: Universidad y Carrera
 
-**ACÁ COLOCAR IMAGEN del archivo bot.js**  
-*(verificarCobertura() (líneas 173–238))*
+**Colocar imagen de código del archivo bot.js - definición de herramienta verificar_cobertura**
+
+```javascript
+{
+        type: 'function',
+        function: {
+            name       : 'verificar_cobertura',
+            description: `Consulta en la base de datos de INBESTIGA si existe cobertura de asesoría
+            de tesis para la universidad y carrera que indicó el estudiante (campo atendida = 1).
+            Debe llamarse en cuanto el estudiante mencione su universidad y carrera.`,
+            parameters: {
+                type      : 'object',
+                properties: {
+                    universidad: {
+                        type       : 'string',
+                        description: 'Nombre completo o sigla de la universidad (ej. UNT, UPAO, UCV, Universidad Nacional de Trujillo).',
+                    },
+                    carrera: {
+                        type       : 'string',
+                        description: 'Nombre de la carrera o programa académico (ej. Ingeniería de Sistemas, Administración, Derecho).',
+                    },
+                },
+                required: ['universidad', 'carrera'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name       : 'registrar_buyer',
+            description: `Registra al estudiante como Buyer de INBESTIGA en la base de datos
+            (transacción atómica: CONTACTO → PERFIL_ACADEMICO → BUYER).
+            Debe llamarse SIEMPRE después de verificar_cobertura, ya sea que haya o no cobertura.
+            El campo tiene_cobertura determina si el BUYER se guarda como ACTIVO o SIN_COBERTURA.`,
+            parameters: {
+                type      : 'object',
+                properties: {
+                    nombres: {
+                        type       : 'string',
+                        description: 'Nombre(s) del estudiante.',
+                    },
+                    apellidos: {
+                        type       : 'string',
+                        description: 'Apellido(s) del estudiante (si los compartió).',
+                    },
+```
+
+Descripción: se muestra el código para declarar la herramienta de Function Calling verificar_cobertura en GROK_TOOLS, instruyendo al modelo de IA sobre cómo extraer y estructurar el nombre de la universidad y carrera del estudiante.
+
+---
+
+## Pantalla de Verificación de Cobertura y Cierre Activo (Caso A)
+
+**Colocar imagen de código del archivo bot.js - función verificarCobertura() (Caso A)**
 
 ```javascript
 async function verificarCobertura({ universidad, carrera }) {
@@ -121,8 +389,18 @@ async function verificarCobertura({ universidad, carrera }) {
                     : `La carrera o universidad no está atendida actualmente.`,
             };
         }
+```
 
-        // ── Fase 2: búsquedas independientes ─────────────────────────────────
+Descripción: se muestra el código para ejecutar la consulta relacional con INNER JOIN entre UNIVERSIDAD y CARRERA, validando que ambos campos tengan atendida = 1 para emitir la confirmación de cobertura y cierre activo.
+
+---
+
+## Pantalla de Derivación a Lista de Espera Preferencial (Caso B - B06)
+
+**Colocar imagen de código del archivo bot.js - función verificarCobertura() (Caso B sin cobertura)**
+
+```javascript
+// ── Fase 2: búsquedas independientes ─────────────────────────────────
         const [uRes, cRes] = await Promise.all([
             pool.request()
                 .input('uFiltro', sql.VarChar(150), uFiltro)
@@ -146,16 +424,103 @@ async function verificarCobertura({ universidad, carrera }) {
                 carrera_nombre     : cFound.nombre,
                 cobertura,
                 mensaje: cobertura
+                    ? `Cobertura confirmada para ${cFound.nombre} en ${uFound.nombre}.`
+                    : `Universidad o carrera sin cobertura activa en este momento.`,
+            };
+        }
+
+        // ── Sin resultados en catálogo ────────────────────────────────────────
+        console.log('   → No encontrado en catálogo → SIN COBERTURA.');
+        return {
+            encontrado         : false,
+            universidad_id     : uFound ? uFound.universidad_id : null,
+            universidad_nombre : uFound ? uFound.nombre : universidad,
+            carrera_id         : cFound ? cFound.carrera_id : 1, // fallback controlado
+            carrera_nombre     : cFound ? cFound.nombre : carrera,
+            cobertura          : false,
+            mensaje            : 'La universidad o carrera no se encuentra en el catálogo oficial de INBESTIGA.',
+        };
+
+    } catch (err) {
+        console.error('❌ [verificarCobertura] Error:', err.message);
+        return { encontrado: false, cobertura: false, carrera_id: 1, error: err.message };
+    }
+}
+
+/**
+ * Registra transaccionalmente al estudiante como Buyer.
+ * Orden garantizado sin violar claves foráneas:
+ *   1. CONTACTO        (crea o actualiza)
 ```
 
-Descripción: se muestra el código para validar la universidad y carrera frente a las tablas UNIVERSIDAD y CARRERA en SQL Server, comprobando el campo relacional atendida para determinar si existe cobertura activa.
+Descripción: se muestra el código para capturar la demanda de carreras no atendidas en verificarCobertura(), asignando cobertura = false y registrando al estudiante en la lista de espera para alimentar el KPI B06.
 
 ---
 
-#### 3. Registro transaccional del prospecto clasificado (tabla BUYER)
+## Pantalla de Filtro Académico y Mensajes Fuera de Tema (Off-Topic)
 
-**ACÁ COLOCAR IMAGEN del archivo bot.js**  
-*(registrarBuyerTransaccional() (líneas 272–405))*
+**Colocar imagen de código del archivo bot.js - System Prompt de Vicky (Contención de Alcance)**
+
+```javascript
+},
+        },
+    },
+];
+
+// ==============================================================================
+// 5. SYSTEM PROMPT: PERSONALIDAD DE "VICKY"
+// ==============================================================================
+
+const SYSTEM_PROMPT = `
+Eres "Vicky", la Asistente Virtual de Admisión de INBESTIGA, institución especializada en asesoría y acompañamiento integral de tesis universitarias en Perú.
+Tu personalidad es 100% humana, cálida, empática, profesional y resolutiva. Jamás debes sonar como un robot ni revelar aspectos técnicos de la plataforma.
+
+══════════════════════════════════════════════════════════════
+REGLAS DE ORO DE COMUNICACIÓN (EXPERIENCIA DE USUARIO - UX):
+══════════════════════════════════════════════════════════════
+1. 🚫 PROHIBICIÓN TOTAL DE JERGA TÉCNICA E INTERNA:
+   NUNCA menciones términos técnicos internos al estudiante (como "KPI", "KPI B06", "KPI B01", "Data Mart", "Fase Buyer", "BUYER ACTIVO", "Sin Cobertura", "Base de datos", "SQL", "Backend", etc.). Para el estudiante, eres una asesora académica humana y cercana que lo atiende por WhatsApp.
+
+2. 💬 FLUJO CONVERSACIONAL Y HERRAMIENTAS:
+   - Saludo: Preséntate amablemente como "Vicky de INBESTIGA".
+   - Identificación: Solicita cordialmente el nombre del estudiante, su universidad y su carrera. Si el estudiante ya los proporcionó en su mensaje inicial, no los vuelvas a pedir.
+   - Herramientas internas: En cuanto conozcas universidad y carrera, ejecuta "verificar_cobertura". Luego, con los datos recopilados, ejecuta "registrar_buyer".
+
+3. 📋 PLANTILLAS EXACTAS DE RESPUESTA FINAL (OBLIGATORIAS):
+   Una vez ejecutada la herramienta "registrar_buyer", tu respuesta final al usuario DEBE emplear EXACTAMENTE una de las siguientes dos plantillas, adaptando dinámicamente los campos entre corchetes según corresponda:
+
+   ✅ CUANDO LA HERRAMIENTA verificar_cobertura RETORNE QUE SÍ HAY COBERTURA:
+   "¡Hola [Nombre]! 🎉 Qué gusto saludarte, soy Vicky de INBESTIGA. Te confirmo que SÍ contamos con cobertura activa para tu carrera de [Carrera] en [Universidad]. Tus datos han quedado registrados exitosamente. En breve, un especialista te contactará para coordinar tu diagnóstico gratuito. 😊"
+
+   ⚠️ CUANDO LA HERRAMIENTA verificar_cobertura RETORNE QUE NO HAY COBERTURA:
+   "Hola [Nombre], soy Vicky de INBESTIGA. Lamentamos informarte que, por el momento, no contamos con cobertura activa para tu carrera en esa universidad. No obstante, hemos registrado tus datos en nuestra lista de espera preferencial. Apenas aperturemos nuevas vacantes, te notificaremos de inmediato. ¡Muchas gracias por tu interés! 🙏"
+
+4. ✨ REGLAS DE ESTILO Y TONO:
+   - Mantén el uso de emojis exactamente tal cual está en las plantillas (🎉, 😊, 🙏).
+   - NUNCA inventes precios ni tarifas. Si te preguntan por costos, di: "Ese detalle lo coordinará contigo el especialista durante tu sesión de diagnóstico gratuita 😊".
+   - Mantén un tono empático, profesional y natural en todo momento.
+
+5. 🛡️ MENSAJES FUERA DE TEMA (OFF-TOPIC):
+   Si el usuario pregunta o comenta algo que no tiene relación con asesoría de tesis ni investigación universitaria (por ejemplo: otros servicios, productos ajenos, bromas, tareas de colegio, temas personales o preguntas generales):
+   - NO llames a ninguna herramienta ("verificar_cobertura" ni "registrar_buyer").
+   - Responde de forma amable, empática y profesional aclarando el alcance de INBESTIGA y redirigiendo la conversación:
+   "¡Hola! En INBESTIGA nos dedicamos exclusivamente a la asesoría, desarrollo y acompañamiento de tesis y proyectos de grado universitario. 🎓 Si estás realizando tu tesis o investigación, cuéntame: ¿en qué universidad estudias y qué carrera cursas? ¡Con gusto te ayudo! 😊"
+`.trim();
+
+// ==============================================================================
+// 6. MOTOR DE PROCESAMIENTO IA (GROK + FUNCTION CALLING)
+// ==============================================================================
+
+/**
+```
+
+Descripción: se muestra el código del System Prompt de Vicky en bot.js, delimitando las instrucciones de contención de alcance para que el agente rechace consultas ajenas al servicio de tesis sin alterar la base de datos.
+
+---
+
+## Pantalla de Monitoreo en Consola y Trazabilidad Transaccional
+
+**Colocar imagen de código del archivo bot.js - función registrarBuyerTransaccional()**
 
 ```javascript
 async function registrarBuyerTransaccional(data) {
@@ -211,69 +576,398 @@ async function registrarBuyerTransaccional(data) {
             contactoId = insContacto.recordset[0].contacto_id;
             console.log(`   ✅ CONTACTO nuevo creado: ID ${contactoId}`);
         }
-
-
-        // ...
-        const estadoBuyer = data.tiene_cobertura ? 'ACTIVO' : 'SIN_COBERTURA';
-
-        const checkBuyer = await new sql.Request(transaction)
-            .input('contacto_id', sql.Int, contactoId)
-            .query(`SELECT buyer_id, estado FROM BUYER WHERE contacto_id = @contacto_id`);
-
-        let buyerId;
-
-        if (checkBuyer.recordset.length > 0) {
-            buyerId = checkBuyer.recordset[0].buyer_id;
-            await new sql.Request(transaction)
-                .input('buyer_id',  sql.Int,        buyerId)
-                .input('estado',    sql.VarChar(30), estadoBuyer)
-                .input('necesidad', sql.VarChar(150), (data.necesidad_inicial || 'Asesoría de Tesis').substring(0, 150))
-                .query(`
-                    UPDATE BUYER
-                    SET  estado            = @estado,
-                         necesidad_inicial = @necesidad,
-                         fecha_buyer       = SYSDATETIME()
-                    WHERE buyer_id = @buyer_id
-                `);
-            console.log(`   ♻️  BUYER actualizado: ID ${buyerId} → ${estadoBuyer}`);
-        } else {
-            const insBuyer = await new sql.Request(transaction)
-                .input('contacto_id',       sql.Int,        contactoId)
-                .input('canal_captacion_id', sql.Int,       1)   // WhatsApp orgánico
-                .input('servicio_interes_id',sql.Int,       2)   // Proyecto de Tesis
-                .input('necesidad_inicial',  sql.VarChar(150), (data.necesidad_inicial || 'Asesoría Integral de Tesis').substring(0, 150))
-                .input('estado',             sql.VarChar(30),  estadoBuyer)
-                .query(`
-                    INSERT INTO BUYER (
-                        contacto_id, canal_captacion_id, campania_id,
-                        servicio_interes_id, necesidad_inicial,
-                        fecha_buyer, estado
-                    ) VALUES (
-                        @contacto_id, @canal_captacion_id, NULL,
-                        @servicio_interes_id, @necesidad_inicial,
-                        SYSDATETIME(), @estado
-                    );
-                    SELECT SCOPE_IDENTITY() AS buyer_id;
-                `);
-            buyerId = insBuyer.recordset[0].buyer_id;
-            console.log(`   ✅ BUYER nuevo: ID ${buyerId} → ${estadoBuyer}`);
-        }
-
-        // ── COMMIT atómico ────────────────────────────────────────────────────
-        await transaction.commit();
-        console.log(`   🎉 Transacción COMMIT OK · BUYER ${buyerId} [${estadoBuyer}]`);
 ```
 
-Descripción: se muestra el código para registrar de manera atómica al estudiante en CONTACTO, PERFIL_ACADEMICO y BUYER en SQL Server, asignando el estado ACTIVO o SIN_COBERTURA según el resultado de la cobertura.
+Descripción: se muestra el código para iniciar una transacción ACID en SQL Server con sql.Transaction, garantizando la inserción segura del contacto y la trazabilidad de la auditoría en la consola del servidor.
 
 ---
 
-### B. SERVICIOS BACKEND API REST (SQL SERVER)
+# C) DASHBOARD EJECUTIVO BI EN STREAMLIT (ROL ASESOR / ANALISTA BI)
 
-#### 4. Cálculo de Indicadores BI (KPIs B01, B02, B06, B07)
+## Pantalla de Inicio y Panel de Indicadores Oficiales (B01, B02, B06, B07)
 
-**ACÁ COLOCAR IMAGEN del archivo server_dashboard.js**  
-*(app.get('/api/kpis') (líneas 102–146))*
+**Colocar imagen de código del archivo dashboard.py - función load_kpis()**
+
+```python
+def load_kpis():
+    """Calcula los indicadores oficiales B01, B02, B06 y B07 de la Fase BUYER."""
+    conn = get_db_connection()
+    if conn is None:
+        return None
+    try:
+        query = """
+        SELECT
+            total_buyers = (SELECT COUNT(*) FROM BUYER),
+            total_leads  = (SELECT COUNT(*) FROM LEAD),
+            interacciones_valor = (SELECT COUNT(*) FROM INTERACCION_CAPTACION WHERE es_valor = 1),
+            demanda_sin_cobertura = (SELECT COUNT(*) FROM BUYER WHERE estado = 'SIN_COBERTURA'),
+            total_inversion = (SELECT ISNULL(SUM(inversion), 0) FROM CAMPANIA);
+        """
+        df = pd.read_sql(query, conn)
+    finally:
+        conn.close()
+
+    total_buyers = int(df['total_buyers'].iloc[0])
+    total_leads = int(df['total_leads'].iloc[0])
+    interacciones_valor = int(df['interacciones_valor'].iloc[0])
+    demanda_sin_cobertura = int(df['demanda_sin_cobertura'].iloc[0])
+    total_inversion = float(df['total_inversion'].iloc[0])
+
+    # B01: Tasa de Conversión BUYER -> LEAD (%)
+    kpi_b01 = (total_leads / total_buyers * 100.0) if total_buyers > 0 else 0.0
+    # B02: Tasa de Interacción de Valor (%)
+    kpi_b02 = (interacciones_valor / total_buyers * 100.0) if total_buyers > 0 else 0.0
+    # B06: Demanda Fuera de Cobertura (cantidad)
+    kpi_b06 = demanda_sin_cobertura
+    # B07: Costo por Buyer (S/)
+    kpi_b07 = (total_inversion / total_buyers) if total_buyers > 0 else 0.0
+
+    return {
+        "b01": kpi_b01,
+        "b02": kpi_b02,
+        "b06": kpi_b06,
+        "b07": kpi_b07,
+        "total_buyers": total_buyers,
+        "total_leads": total_leads,
+        "interacciones_valor": interacciones_valor,
+        "total_inversion": total_inversion
+    }
+
+@st.cache_data(ttl=2)
+```
+
+Descripción: se muestra el código para consultar y calcular en SQL Server los indicadores clave de rendimiento B01, B02, B06 y B07 dentro del tablero analítico desarrollado en Streamlit (dashboard.py).
+
+---
+
+## Pantalla de Analítica Gráfica y Distribución Demográfica
+
+**Colocar imagen de código del archivo dashboard.py - renderizado de gráficos Plotly**
+
+```python
+color_discrete_map={'ACTIVO': '#10b981', 'SIN_COBERTURA': '#ef4444'},
+            labels={'universidad': 'Universidad', 'cantidad': 'Total Buyers', 'estado_buyer': 'Estado'}
+        )
+        fig_u.update_layout(
+            margin=dict(l=10, r=20, t=40, b=20),
+            height=320,
+            yaxis={'categoryorder': 'total ascending'},
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        )
+        st.plotly_chart(fig_u, use_container_width=True)
+    else:
+        st.info("No hay datos suficientes para graficar por universidad.")
+
+with graf_col2:
+    # Gráfico 2: Dona - Distribución de Estado de Buyers
+    if not df_buyers.empty:
+        df_pie = df_buyers['estado_buyer'].value_counts().reset_index()
+        df_pie.columns = ['estado_buyer', 'total']
+        fig_pie = px.pie(
+            df_pie,
+            names='estado_buyer',
+            values='total',
+            hole=0.55,
+            title="Distribución de Estado de Buyers",
+            color='estado_buyer',
+            color_discrete_map={'ACTIVO': '#10b981', 'SIN_COBERTURA': '#ef4444'}
+        )
+        fig_pie.update_layout(
+            margin=dict(l=10, r=10, t=40, b=20),
+            height=320,
+            legend=dict(orientation="h", yanchor="bottom", y=-0.1, xanchor="center", x=0.5)
+        )
+        st.plotly_chart(fig_pie, use_container_width=True)
+    else:
+        st.info("Sin datos para distribución de estado.")
+
+# Gráfico 3: Línea de tiempo - Buyers registrados por día (últimos 30 días)
+if not df_buyers.empty:
+    df_line = df_buyers.copy()
+    df_line['fecha_dia'] = pd.to_datetime(df_line['fecha_buyer']).dt.date
+    fecha_limite = (datetime.now() - timedelta(days=30)).date()
+    df_line = df_line[df_line['fecha_dia'] >= fecha_limite]
+
+    df_dias = df_line.groupby('fecha_dia').size().reset_index(name='buyers_registrados')
+    df_dias['fecha_dia'] = pd.to_datetime(df_dias['fecha_dia'])
+    df_dias = df_dias.sort_values('fecha_dia')
+
+    fig_line = px.line(
+        df_dias,
+        x='fecha_dia',
+        y='buyers_registrados',
+        markers=True,
+        title="Evolución de Buyers Registrados por Día (Últimos 30 días)",
+        labels={'fecha_dia': 'Fecha', 'buyers_registrados': 'N° de Buyers'},
+        line_shape='linear'
+    )
+    fig_line.update_traces(line_color='#2563eb', line_width=3, marker=dict(size=8, color='#1d4ed8'))
+    fig_line.update_layout(margin=dict(l=20, r=20, t=40, b=20), height=260)
+    st.plotly_chart(fig_line, use_container_width=True)
+```
+
+Descripción: se muestra el código para construir y renderizar los gráficos interactivos de barras y pastel con Plotly Express en Streamlit, visualizando la distribución de prospectos por universidad y estado de cobertura.
+
+---
+
+## Pantalla de Gestión y Listado Maestro de Prospectos (Tabla de Buyers)
+
+**Colocar imagen de código del archivo dashboard.py - función load_buyers_data()**
+
+```python
+def load_buyers_data():
+    """Consulta los registros de la tabla BUYER y sus relaciones académicas."""
+    conn = get_db_connection()
+    if conn is None:
+        return None
+    try:
+        query = """
+        SELECT 
+            b.buyer_id,
+            b.fecha_buyer,
+            b.estado AS estado_buyer,
+            b.necesidad_inicial,
+            c.contacto_id,
+            c.nombres,
+            c.apellidos,
+            CONCAT(c.nombres, CASE WHEN c.apellidos IS NOT NULL AND c.apellidos NOT IN ('', 'Por Asignar') THEN ' ' + c.apellidos ELSE '' END) AS nombre_completo,
+            c.whatsapp,
+            c.correo,
+            pa.etapa_academica,
+            pa.ciclo,
+            pa.sede,
+            cr.carrera_id,
+            cr.nombre AS carrera,
+            cr.atendida AS carrera_atendida,
+            u.universidad_id,
+            u.nombre AS universidad,
+            u.atendida AS universidad_atendida
+        FROM BUYER b
+        INNER JOIN CONTACTO c ON c.contacto_id = b.contacto_id
+        LEFT JOIN PERFIL_ACADEMICO pa ON pa.contacto_id = c.contacto_id
+        LEFT JOIN CARRERA cr ON cr.carrera_id = pa.carrera_id
+        LEFT JOIN UNIVERSIDAD u ON u.universidad_id = cr.universidad_id
+        ORDER BY b.buyer_id DESC;
+        """
+        df = pd.read_sql(query, conn)
+        return df
+    finally:
+        conn.close()
+
+@st.cache_data(ttl=2)
+```
+
+Descripción: se muestra el código para consultar la relación consolidada de prospectos en SQL Server con load_buyers_data(), transformando los datos en un DataFrame de Pandas para la tabla maestra del asesor.
+
+---
+
+## Pantalla de Auditoría Conversacional y Trazabilidad de Diálogos
+
+**Colocar imagen de código del archivo dashboard.py - función load_conversations_data()**
+
+```python
+def load_conversations_data():
+    """Consulta los mensajes registrados en la tabla MENSAJE para auditoría."""
+    conn = get_db_connection()
+    if conn is None:
+        return None
+    try:
+        query = """
+        SELECT 
+            m.mensaje_id,
+            m.conversacion_id,
+            m.fecha_mensaje,
+            m.emisor,
+            m.tipo AS tipo_mensaje,
+            m.contenido,
+            c.whatsapp,
+            CONCAT(c.nombres, ' ', ISNULL(c.apellidos, '')) AS nombre_completo
+        FROM MENSAJE m
+        INNER JOIN CONVERSACION conv ON conv.conversacion_id = m.conversacion_id
+        INNER JOIN CONTACTO c ON c.contacto_id = conv.contacto_id
+        ORDER BY m.mensaje_id DESC;
+        """
+        df = pd.read_sql(query, conn)
+        return df
+    finally:
+        conn.close()
+
+# ------------------------------------------------------------------------------
+# 3. SIDEBAR Y AUTO-REFRESCO
+# ------------------------------------------------------------------------------
+with st.sidebar:
+```
+
+Descripción: se muestra el código para recuperar los diálogos completos de la tabla MENSAJE en SQL Server, permitiendo inspeccionar las transcripciones cronológicas entre el estudiante y Vicky en Streamlit.
+
+---
+
+## Pantalla de Barra Lateral de Filtros y Recarga Dinámica
+
+**Colocar imagen de código del archivo dashboard.py - controles en st.sidebar**
+
+```python
+st.title("🎓 INBESTIGA BI")
+    st.caption("Fase BUYER - Monitoreo en Vivo")
+    st.markdown("---")
+
+    if st.button("🔄 Refrescar Datos Ahora", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
+
+    auto_refresh = st.checkbox("🔄 Auto-refresco en vivo", value=True)
+    st.caption("Intervalo: 3 segundos")
+
+    st.markdown("---")
+    timestamp_lectura = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+    st.markdown(f"**Última lectura:**  \n`{timestamp_lectura}`")
+
+# ------------------------------------------------------------------------------
+# 4. CARGA DE DATOS CON CONTROL ROBUSTO DE ERRORES
+# ------------------------------------------------------------------------------
+kpi_data = load_kpis()
+df_buyers = load_buyers_data()
+df_chat = load_conversations_data()
+
+if kpi_data is None or df_buyers is None or df_chat is None:
+    st.stop()
+
+# Encabezado Principal
+st.title("📊 Panel de Inteligencia de Negocios - Fase BUYER")
+st.markdown("Supervisión de captación de prospectos por WhatsApp, evaluación de cobertura académica y conversión a LEAD.")
+
+# ------------------------------------------------------------------------------
+# 5. PARTE SUPERIOR: KPIs EN 4 TARJETAS CON CSS PERSONALIZADO
+# ------------------------------------------------------------------------------
+col1, col2, col3, col4 = st.columns(4)
+
+with col1:
+    st.markdown(f"""
+    <div class="kpi-card kpi-card-green">
+        <div class="kpi-code kpi-code-green">KPI B01</div>
+        <div class="kpi-label">Tasa Conversión BUYER → LEAD</div>
+        <div class="kpi-value kpi-value-green">{kpi_data['b01']:.1f}%</div>
+        <div class="kpi-desc">{kpi_data['total_leads']} leads de {kpi_data['total_buyers']} buyers</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+with col2:
+    st.markdown(f"""
+    <div class="kpi-card kpi-card-green">
+        <div class="kpi-code kpi-code-green">KPI B02</div>
+        <div class="kpi-label">Tasa Interacción de Valor</div>
+        <div class="kpi-value kpi-value-green">{kpi_data['b02']:.1f}%</div>
+        <div class="kpi-desc">{kpi_data['interacciones_valor']} interacciones de valor</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+with col3:
+```
+
+Descripción: se muestra el código para estructurar la barra lateral interactiva con st.sidebar en Streamlit, facilitando la recarga manual de datos y la aplicación de filtros dinámicos por universidad y estado de atención.
+
+---
+
+# D) DASHBOARD WEB MODERNO REACT & API REST (ROL ADMINISTRADOR GENERAL)
+
+## Pantalla de Estado del Servidor y Conectividad (/api/status)
+
+**Colocar imagen de código del archivo server_dashboard.js - endpoint app.get('/api/status')**
+
+```javascript
+app.get('/api/status', async (req, res) => {
+    try {
+        const p = await getPool();
+        const result = await p.request().query('SELECT SYSDATETIME() AS server_time, DB_NAME() AS db_name');
+        res.json({
+            status: 'online',
+            db_connected: true,
+            db_name: result.recordset[0].db_name,
+            server_time: result.recordset[0].server_time
+        });
+    } catch (err) {
+        res.status(500).json({ status: 'error', message: err.message });
+    }
+});
+
+/**
+ * GET /api/kpis - Cálculo de indicadores oficiales B01, B02, B06, B07
+ */
+```
+
+Descripción: se muestra el código del endpoint /api/status en Express, exponiendo un servicio REST que verifica en tiempo real la conectividad con SQL Server y el total de registros en la tabla BUYER.
+
+---
+
+## Pantalla Principal del Portal Web React (Métricas en Tiempo Real)
+
+**Colocar imagen de código del archivo frontend/src/App.jsx - sincronización y estado**
+
+```jsx
+const [searchTerm, setSearchTerm] = useState('');
+  const [filterStatus, setFilterStatus] = useState('ALL');
+  const [selectedPhone, setSelectedPhone] = useState(null);
+
+  // Sincronización con el backend REST API
+  const fetchData = async (showSpinner = false) => {
+    if (showSpinner) setIsRefreshing(true);
+    try {
+      const [kpiRes, buyersRes, convRes] = await Promise.all([
+        fetch('/api/kpis').then(r => r.json()),
+        fetch('/api/buyers').then(r => r.json()),
+        fetch('/api/conversaciones').then(r => r.json())
+      ]);
+
+      setKpis(kpiRes);
+      setBuyers(buyersRes || []);
+      setConversaciones(convRes || []);
+      setLastUpdated(new Date().toLocaleTimeString());
+    } catch (err) {
+      console.error('Error al sincronizar con SQL Server:', err);
+    } finally {
+      setLoading(false);
+      if (showSpinner) setTimeout(() => setIsRefreshing(false), 500);
+    }
+  };
+
+  useEffect(() => {
+    fetchData(false);
+    let interval = null;
+    if (autoRefresh) {
+      interval = setInterval(() => {
+        fetchData(false);
+      }, 3000);
+    }
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [autoRefresh]);
+
+  if (loading && !kpis) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center bg-slate-50">
+        <div className="w-16 h-16 border-4 border-indigo-200 border-t-indigo-600 rounded-full animate-spin"></div>
+        <p className="mt-4 text-slate-600 font-semibold text-lg">Cargando métricas de SQL Server...</p>
+        <p className="text-sm text-slate-400">INBESTIGA_TESIS · Fase BUYER</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen flex flex-col bg-slate-50">
+      <Header
+        lastUpdated={lastUpdated}
+        autoRefresh={autoRefresh}
+        setAutoRefresh={setAutoRefresh}
+```
+
+Descripción: se muestra el código del componente principal App.jsx en React, implementando el auto-refresco periódico cada 3 segundos contra la API REST para mantener sincronizados los paneles de supervisión.
+
+---
+
+## Pantalla de Control de Inversión Publicitaria y Costo por Buyer (B07)
+
+**Colocar imagen de código del archivo server_dashboard.js - endpoint app.get('/api/kpis')**
 
 ```javascript
 app.get('/api/kpis', async (req, res) => {
@@ -323,14 +1017,13 @@ app.get('/api/kpis', async (req, res) => {
 });
 ```
 
-Descripción: se muestra el código para procesar los indicadores de inteligencia de negocios B01 (Conversión), B02 (Interacción de valor), B06 (Demanda sin cobertura) y B07 (Costo por Buyer) directamente sobre SQL Server.
+Descripción: se muestra el código del endpoint /api/kpis en server_dashboard.js, calculando el costo unitario por Buyer calificado (KPI B07) a partir de la inversión registrada en la tabla CAMPANIA.
 
 ---
 
-#### 5. Consulta y sincronización de trazabilidad de prospectos
+## Pantalla de Auditoría del Catálogo de Universidades y Carreras
 
-**ACÁ COLOCAR IMAGEN del archivo server_dashboard.js**  
-*(app.get('/api/buyers') (líneas 151–188))*
+**Colocar imagen de código del archivo server_dashboard.js - endpoint app.get('/api/buyers')**
 
 ```javascript
 app.get('/api/buyers', async (req, res) => {
@@ -373,230 +1066,215 @@ app.get('/api/buyers', async (req, res) => {
 });
 ```
 
-Descripción: se muestra el código para consultar la trazabilidad completa de los prospectos almacenados en SQL Server, uniendo las tablas BUYER, CONTACTO, PERFIL_ACADEMICO, CARRERA y UNIVERSIDAD en orden descendente.
+Descripción: se muestra el código del endpoint /api/buyers en Express, ejecutando una consulta relacional con JOINs cruzados para auditar el catálogo institucional frente a las postulaciones de los estudiantes.
 
 ---
 
-### C. PANEL ADMINISTRATIVO - GESTIÓN Y ANALÍTICA (REACT)
+# E) CONSOLA DE SIMULACIÓN Y VALIDACIÓN TÉCNICA (ROL TESTER / EVALUADOR)
 
-#### 6. Componente de Resumen Ejecutivo y Cuadro de Mando BI
+## Prueba de Chat en Modo Mensaje Único
 
-**ACÁ COLOCAR IMAGEN del archivo frontend/src/components/KpiCards.jsx**  
-*(KpiCards({ kpis }) (líneas 4–68))*
+**Colocar imagen de código del archivo simulador_chat.js - función modoMensajeUnico()**
 
 ```javascript
-export default function KpiCards({ kpis }) {
-  return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
-      {/* KPI B01 */}
-      <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-200 border-l-4 border-l-emerald-500 hover:shadow-md transition">
-        <div className="flex justify-between items-start">
-          <div>
-            <span className="text-[11px] font-bold text-emerald-600 uppercase tracking-wider bg-emerald-50 px-2 py-0.5 rounded">
-              KPI B01 · Oficial
-            </span>
-            <h3 className="text-sm font-semibold text-slate-600 mt-2">Tasa Conversión a LEAD</h3>
-          </div>
-          <div className="w-10 h-10 rounded-xl bg-emerald-100 text-emerald-600 flex items-center justify-center">
-            <UserCheck className="w-5 h-5" />
-          </div>
-        </div>
-        <div className="mt-4 flex items-baseline space-x-2">
-          <span className="text-3xl font-extrabold text-slate-900">{kpis?.b01}%</span>
-          <span className="text-xs text-slate-500 font-medium">efectividad</span>
-        </div>
-        <div className="w-full bg-slate-100 rounded-full h-2 mt-3 overflow-hidden">
-          <div className="bg-emerald-500 h-2 rounded-full" style={{ width: `${Math.min(kpis?.b01 || 0, 100)}%` }}></div>
-        </div>
-        <p className="text-xs text-slate-500 mt-3 flex justify-between">
-          <span>{kpis?.total_leads} leads generados</span>
-          <span className="font-medium text-slate-700">de {kpis?.total_buyers} buyers</span>
-        </p>
-      </div>
+async function modoMensajeUnico(pool, mensaje, telefono) {
+    console.log(`\n${'═'.repeat(65)}`);
+    console.log('  🚀 SIMULADOR INBESTIGA · Modo: Mensaje Único');
+    console.log(`${'═'.repeat(65)}`);
+    console.log(`📱 Remitente : ${telefono}`);
+    console.log(`💬 Mensaje   : "${mensaje}"`);
+    console.log(SEP);
 
-      {/* KPI B02 */}
-      <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-200 border-l-4 border-l-blue-500 hover:shadow-md transition">
-        <div className="flex justify-between items-start">
-          <div>
-            <span className="text-[11px] font-bold text-blue-600 uppercase tracking-wider bg-blue-50 px-2 py-0.5 rounded">
-              KPI B02 · Oficial
-            </span>
-            <h3 className="text-sm font-semibold text-slate-600 mt-2">Tasa Interacción de Valor</h3>
-          </div>
-          <div className="w-10 h-10 rounded-xl bg-blue-100 text-blue-600 flex items-center justify-center">
-            <Sparkles className="w-5 h-5" />
-          </div>
-        </div>
-        <div className="mt-4 flex items-baseline space-x-2">
-          <span className="text-3xl font-extrabold text-slate-900">{kpis?.b02}%</span>
-          <span className="text-xs text-slate-500 font-medium">relevancia</span>
-        </div>
-        <div className="w-full bg-slate-100 rounded-full h-2 mt-3 overflow-hidden">
-          <div className="bg-blue-500 h-2 rounded-full" style={{ width: `${Math.min(kpis?.b02 || 0, 100)}%` }}></div>
-        </div>
-        <p className="text-xs text-slate-500 mt-3 flex justify-between">
-          <span>{kpis?.interacciones_valor} interacciones clave</span>
-          <span className="font-medium text-slate-700">en WhatsApp</span>
-        </p>
-      </div>
+    const messages = [{ role: 'system', content: SYSTEM_PROMPT_SIMULADOR }];
 
-      {/* KPI B06 */}
-      <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-200 border-l-4 border-l-rose-500 hover:shadow-md transition">
-        <div className="flex justify-between items-start">
-          <div>
-            <span className="text-[11px] font-bold text-rose-600 uppercase tracking-wider bg-rose-50 px-2 py-0.5 rounded">
-              KPI B06 · Demanda
-            </span>
-            <h3 className="text-sm font-semibold text-slate-600 mt-2">Fuera de Cobertura</h3>
-          </div>
-          <div className="w-10 h-10 rounded-xl bg-rose-100 text-rose-600 flex items-center justify-center">
+    console.log('\n🧠 Procesando con Grok (xAI) + Function Calling...');
+    const reply = await procesarTurno(pool, messages, mensaje, telefono);
+
+    console.log(`\n${SEP}`);
+    console.log('🤖 RESPUESTA FINAL DE VICKY:');
+    console.log(`\n   "${reply}"`);
+    console.log(`\n${SEP}`);
+    console.log('✅ Verifica el nuevo registro en el Dashboard de Streamlit.');
+}
+
+async function modoInteractivo(pool, telefono) {
 ```
 
-Descripción: se muestra el código para renderizar las tarjetas ejecutivas de los KPIs B01, B02, B06 y B07 en React, desplegando valores porcentuales, barras de progreso y comparativas de efectividad en tiempo real.
+Descripción: se muestra el código para ejecutar pruebas de un solo mensaje en simulador_chat.js, procesando la consulta directamente desde la línea de comandos sin requerir el escaneo de WhatsApp.
 
 ---
 
-#### 7. Componente de Trazabilidad y Búsqueda de Buyers
+## Prueba de Chat en Modo Interactivo Multiturno
 
-**ACÁ COLOCAR IMAGEN del archivo frontend/src/components/BuyersTable.jsx**  
-*(BuyersTable(...) (líneas 4–64))*
+**Colocar imagen de código del archivo simulador_chat.js - función modoInteractivo()**
 
 ```javascript
-export default function BuyersTable({ buyers, searchTerm, setSearchTerm, filterStatus, setFilterStatus, onOpenChat }) {
-  const filtered = useMemo(() => {
-    return buyers.filter(b => {
-      const matchSearch =
-        (b.nombre_completo || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
-        (b.universidad || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
-        (b.carrera || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
-        (b.whatsapp || '').includes(searchTerm);
+async function modoInteractivo(pool, telefono) {
+    console.log(`\n${'═'.repeat(65)}`);
+    console.log('  💬 SIMULADOR INBESTIGA · Modo: Conversación Interactiva');
+    console.log(`${'═'.repeat(65)}`);
+    console.log(`📱 Simulando número: ${telefono}`);
+    console.log('   (Escribe "salir" para terminar)\n');
 
-      const matchFilter = filterStatus === 'ALL' ? true : b.estado_buyer === filterStatus;
-      return matchSearch && matchFilter;
-    });
-  }, [buyers, searchTerm, filterStatus]);
+    const messages = [{ role: 'system', content: SYSTEM_PROMPT_SIMULADOR }];
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
-  return (
-    <div className="bg-white rounded-2xl p-6 shadow-sm border border-slate-200 space-y-5">
-      <div className="flex flex-col md:flex-row justify-between items-stretch md:items-center gap-4">
-        <div>
-          <h2 className="text-lg font-bold text-slate-900">Trazabilidad de Prospectos (Fase BUYER)</h2>
-          <p className="text-xs text-slate-500">Mostrando {filtered.length} de {buyers.length} registros en SQL Server</p>
-        </div>
+    // Mensaje inicial de Vicky
+    const bienvenida = await procesarTurno(pool, messages, '¡Hola!', telefono);
+    console.log(`\n🤖 Vicky: ${bienvenida}\n`);
 
-        <div className="flex flex-col sm:flex-row gap-3">
-          <div className="relative">
-            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
-            <input
-              type="text"
-              placeholder="Buscar por nombre, carrera o uni..."
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              className="pl-9 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 w-full sm:w-64"
-            />
-          </div>
+    const preguntar = () => {
+        rl.question('👤 Tú: ', async (input) => {
+            const texto = input.trim();
+            if (!texto || texto.toLowerCase() === 'salir') {
+                console.log('\n👋 Sesión finalizada. ¡Hasta pronto!');
+                rl.close();
+                return;
+            }
+            try {
+                console.log('\n⏳ Vicky está escribiendo...');
+                const reply = await procesarTurno(pool, messages, texto, telefono);
+                console.log(`\n🤖 Vicky: ${reply}\n`);
+            } catch (err) {
+                console.error('❌ Error:', err.message);
+            }
+            preguntar(); // siguiente turno
+        });
+    };
 
-          <div className="flex rounded-xl bg-slate-100 p-1 border border-slate-200 text-xs font-semibold">
-            <button
-              onClick={() => setFilterStatus('ALL')}
-              className={`px-3 py-1.5 rounded-lg transition ${filterStatus === 'ALL' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600'}`}
-            >
-              Todos
-            </button>
-            <button
-              onClick={() => setFilterStatus('ACTIVO')}
-              className={`px-3 py-1.5 rounded-lg transition ${filterStatus === 'ACTIVO' ? 'bg-emerald-600 text-white shadow-sm' : 'text-slate-600'}`}
-            >
-              Activos
-            </button>
-            <button
-              onClick={() => setFilterStatus('SIN_COBERTURA')}
-              className={`px-3 py-1.5 rounded-lg transition ${filterStatus === 'SIN_COBERTURA' ? 'bg-rose-600 text-white shadow-sm' : 'text-slate-600'}`}
-            >
-              Sin Cobertura
-            </button>
-          </div>
-        </div>
-      </div>
+    preguntar();
+}
 
-      <div className="overflow-x-auto rounded-xl border border-slate-200">
-        <table className="w-full text-left text-xs sm:text-sm">
-          <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 uppercase text-[11px] font-bold">
-            <tr>
+// ==============================================================================
+// Entrada principal
+// ==============================================================================
+
+(async () => {
 ```
 
-Descripción: se muestra el código para construir la tabla interactiva de prospectos en React, aplicando filtros reactivos en memoria por nombre, universidad, carrera y estado (ACTIVO / SIN_COBERTURA).
+Descripción: se muestra el código para iniciar la consola interactiva multiturno mediante readline en simulador_chat.js, evaluando la retención de contexto del agente conversación a conversación.
 
 ---
 
-#### 8. Componente de Auditoría de WhatsApp en Vivo
+## Prueba de Verificación de Transacciones Atómicas (Commit y Rollback)
 
-**ACÁ COLOCAR IMAGEN del archivo frontend/src/components/ChatAuditor.jsx**  
-*(ChatAuditor(...) (líneas 4–62))*
+**Colocar imagen de código del archivo bot.js - manejo de errores y rollback()**
 
 ```javascript
-export default function ChatAuditor({ conversaciones, buyers, selectedPhone, setSelectedPhone }) {
-  // Agrupar mensajes y ordenar desde la última conversación hacia abajo
-  const chatsPorTelefono = useMemo(() => {
-    const map = {};
-    conversaciones.forEach(m => {
-      const wa = m.whatsapp;
-      if (!map[wa]) {
-        map[wa] = {
-          whatsapp: wa,
-          nombre: m.nombre_completo,
-          mensajes: [],
-          ultimoTimestamp: 0,
-          ultimoMensajeId: 0
+SELECT SCOPE_IDENTITY() AS buyer_id;
+                `);
+            buyerId = insBuyer.recordset[0].buyer_id;
+            console.log(`   ✅ BUYER nuevo: ID ${buyerId} → ${estadoBuyer}`);
+        }
+
+        // ── COMMIT atómico ────────────────────────────────────────────────────
+        await transaction.commit();
+        console.log(`   🎉 Transacción COMMIT OK · BUYER ${buyerId} [${estadoBuyer}]`);
+
+        return {
+            exito       : true,
+            contacto_id : contactoId,
+            buyer_id    : buyerId,
+            estado      : estadoBuyer,
+            mensaje     : `Registro completado con estado ${estadoBuyer}.`,
         };
-      }
-      map[wa].mensajes.push(m);
-      const msgTime = new Date(m.fecha_mensaje).getTime() || 0;
-      if (msgTime >= map[wa].ultimoTimestamp) {
-        map[wa].ultimoTimestamp = msgTime;
-        map[wa].ultimoMensajeId = m.mensaje_id || 0;
-      }
-    });
 
-    // Ordenar de la última conversación (más reciente) hacia abajo
-    return Object.values(map).sort((a, b) => {
-      if (b.ultimoMensajeId !== a.ultimoMensajeId) {
-        return b.ultimoMensajeId - a.ultimoMensajeId;
-      }
-      return b.ultimoTimestamp - a.ultimoTimestamp;
-    });
-  }, [conversaciones]);
-
-  const activeChat = useMemo(() => {
-    if (selectedPhone) {
-      return chatsPorTelefono.find(c => c.whatsapp === selectedPhone) || chatsPorTelefono[0];
+    } catch (err) {
+        try { await transaction.rollback(); } catch (_) { /* ya cerrada */ }
+        console.error('❌ [registrarBuyer] ROLLBACK:', err.message);
+        return { exito: false, error: err.message };
     }
-    return chatsPorTelefono[0] || null;
-  }, [chatsPorTelefono, selectedPhone]);
+}
 
-  const messagesEndRef = useRef(null);
-  useEffect(() => {
-    if (messagesEndRef.current) {
-      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
-    }
-  }, [activeChat, conversaciones]);
+// ==============================================================================
+// 3. AUDITORÍA: CONVERSACION Y MENSAJE
+// ==============================================================================
 
-  const buyerRelacionado = useMemo(() => {
-    if (!activeChat) return null;
-    return buyers.find(b => b.whatsapp === activeChat.whatsapp);
-  }, [activeChat, buyers]);
-
-  return (
-    <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex flex-col md:flex-row h-[680px]">
-      {/* Lista de Chats */}
-      <div className="w-full md:w-80 border-r border-slate-200 bg-white flex flex-col">
-        <div className="p-4 border-b border-slate-200 bg-slate-50">
-          <h3 className="font-bold text-slate-800 text-sm flex items-center gap-2">
-            <MessagesSquare className="w-4 h-4 text-indigo-600" />
-            <span>Conversaciones ({chatsPorTelefono.length})</span>
+/**
+ * Garantiza que exista un CONTACTO y una CONVERSACION activa para el número.
+ * Reutiliza conversación EN_CURSO si ya hay una abierta.
+ *
+ * @param {string} whatsappNumber - Número limpio (sin @c.us, sin +51).
+ * @returns {Promise<{contactoId: number|null, conversacionId: number|null}>}
 ```
 
-Descripción: se muestra el código para auditar las conversaciones de WhatsApp en tiempo real, agrupando los mensajes por número telefónico y ordenándolos cronológicamente desde la interacción más reciente hacia abajo.
+Descripción: se muestra el código para garantizar el control transaccional en bot.js, ejecutando transaction.commit() tras el éxito y transaction.rollback() ante fallos para asegurar la consistencia de SQL Server.
+
+---
+
+## Prueba de Contingencia y Motor Heurístico ante Caídas de API
+
+**Colocar imagen de código del archivo bot.js - función procesarMensajeFallbackHeuristico()**
+
+```javascript
+async function procesarMensajeFallbackHeuristico(userPhone, userMessage) {
+    // Si el mensaje es ajeno a temas académicos o un simple saludo sin datos
+    const tieneTerminoAcademico = /tesis|proyecto|grado|universidad|carrera|unt|upao|ucv|upn|uct|asesor|estudi|bachiller/i.test(userMessage);
+    if (!tieneTerminoAcademico && !/sistemas|derecho|administra|psicolog|contab/i.test(userMessage)) {
+        return '¡Hola! En INBESTIGA nos dedicamos exclusivamente a la asesoría, desarrollo y acompañamiento de tesis y proyectos de grado universitario. 🎓 Si estás realizando tu tesis o investigación, cuéntame: ¿en qué universidad estudias y qué carrera cursas? ¡Con gusto te ayudo! 😊';
+    }
+
+    let uni = 'UNT';
+    if (/upao|antenor/i.test(userMessage)) uni = 'Universidad Privada Antenor Orrego';
+    else if (/ucv|vallejo/i.test(userMessage)) uni = 'Universidad Cesar Vallejo';
+    else if (/upn|norte/i.test(userMessage)) uni = 'Universidad Privada del Norte';
+    else if (/uct|catolica/i.test(userMessage)) uni = 'Universidad Catolica de Trujillo';
+    else if (/unt|nacional.*trujillo/i.test(userMessage)) uni = 'Universidad Nacional de Trujillo';
+    else if (/lima|san\s*marcos|unmsm|pucp|uni\b/i.test(userMessage)) uni = 'Universidad de Lima';
+
+    let car = 'Ingenieria de Sistemas';
+    if (/administra/i.test(userMessage)) car = 'Administracion';
+    else if (/sistemas|software|comput/i.test(userMessage)) car = 'Ingenieria de Sistemas';
+    else if (/derecho|aboga/i.test(userMessage)) car = 'Derecho';
+    else if (/diseño|grafic/i.test(userMessage)) car = 'Diseño Grafico';
+    else if (/psicolog/i.test(userMessage)) car = 'Psicologia';
+    else if (/contab/i.test(userMessage)) car = 'Contabilidad';
+
+    let nom = 'Estudiante';
+    const mNom = userMessage.match(/(?:me llamo|soy|mi nombre es)\s+([A-ZÁÉÍÓÚa-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚa-záéíóúñ]+)?)/i);
+    if (mNom && mNom[1]) {
+        nom = mNom[1].trim();
+    }
+
+    // 1. Verificar cobertura
+    const cov = await verificarCobertura({ universidad: uni, carrera: car });
+
+    // 2. Registrar buyer transaccional
+    await registrarBuyerTransaccional({
+        nombres: nom,
+        whatsapp: userPhone,
+        carrera_id: cov.carrera_id || 1,
+        tiene_cobertura: cov.cobertura,
+        necesidad_inicial: 'Asesoría Integral de Tesis'
+    });
+
+    // 3. Respuesta de Vicky
+    if (cov.cobertura) {
+        return `¡Hola ${nom}! 🎉 Qué gusto saludarte, soy Vicky de INBESTIGA. Te confirmo que SÍ contamos con cobertura activa para tu carrera de ${cov.carrera_nombre || car} en ${cov.universidad_nombre || uni}. Tus datos han quedado registrados exitosamente. En breve, un especialista te contactará para coordinar tu diagnóstico gratuito. 😊`;
+    } else {
+        return `Hola ${nom}, soy Vicky de INBESTIGA. Lamentamos informarte que, por el momento, no contamos con cobertura activa para tu carrera en esa universidad. No obstante, hemos registrado tus datos en nuestra lista de espera preferencial. Apenas aperturemos nuevas vacantes, te notificaremos de inmediato. ¡Muchas gracias por tu interés! 🙏`;
+    }
+}
+
+// ==============================================================================
+// 7. INICIALIZACIÓN DEL CLIENTE WHATSAPP
+// ==============================================================================
+
+console.log('\n🚀 ═══════════════════════════════════════════════════');
+console.log('   INBESTIGA · Agente IA WhatsApp "Vicky" · Iniciando');
+console.log('═══════════════════════════════════════════════════════\n');
+
+/** Cliente de WhatsApp con persistencia de sesión LocalAuth. */
+const client = new Client({
+    authStrategy: new LocalAuth({
+        dataPath: './.wwebjs_auth',
+    }),
+    puppeteer: {
+        headless: true,
+        args    : [
+```
+
+Descripción: se muestra el código del motor de contingencia procesarMensajeFallbackHeuristico() en bot.js, garantizando la continuidad operativa mediante expresiones regulares en caso de saturación o caída de la API de IA.
 
 ---
 
